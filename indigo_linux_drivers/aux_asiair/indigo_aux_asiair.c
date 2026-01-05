@@ -17,7 +17,10 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // version history
-// 1.0 by Joey Troy - Code modified from Rumen G. Bogdanovski
+// 1.0 by Joey Troy  - Code modified from Rumen G. Bogdanovski
+// 2.0 by Seven Watt - Use pigpio library for GPIO and PWM control. 
+//                     Use software PWM on all pins.
+//                     Use heater property to enable Alpaca PWM control
 
 /** INDIGO ZWO Power Ports ASIAIR AUX driver
  \file indigo_aux_asiair.c
@@ -25,8 +28,8 @@
 
 #include "indigo_aux_asiair.h"
 
-#define DRIVER_VERSION         0x0002
-#define AUX_ASIAIR_NAME     "ZWO Power Ports ASIAIR"
+#define DRIVER_VERSION         0x0003
+#define AUX_ASIAIR_NAME     "ZWO Power Ports ASIAIR v2"
 
 #include <stdlib.h>
 #include <string.h>
@@ -40,6 +43,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <fcntl.h>
+
+
+#include <pigpiod_if2.h>
 
 #include <indigo/indigo_driver_xml.h>
 #include <indigo/indigo_io.h>
@@ -57,6 +63,18 @@
 #define AUX_OUTLET_NAME_3_ITEM         (AUX_OUTLET_NAMES_PROPERTY->items + 2)
 #define AUX_OUTLET_NAME_4_ITEM         (AUX_OUTLET_NAMES_PROPERTY->items + 3)
 
+#define AUX_OUTLET_TYPES_PROPERTY_NAME "AUX_OUTLET_TYPES"
+#define AUX_OUTLET_TYPE_1_ITEM_NAME "POWER_OUTLET_TYPE_1"
+#define AUX_OUTLET_TYPE_2_ITEM_NAME "POWER_OUTLET_TYPE_2"
+#define AUX_OUTLET_TYPE_3_ITEM_NAME "POWER_OUTLET_TYPE_3"
+#define AUX_OUTLET_TYPE_4_ITEM_NAME "POWER_OUTLET_TYPE_4"
+
+#define AUX_OUTLET_TYPES_PROPERTY (PRIVATE_DATA->outlet_types_property)
+#define AUX_OUTLET_TYPE_1_ITEM (AUX_OUTLET_TYPES_PROPERTY->items + 0)
+#define AUX_OUTLET_TYPE_2_ITEM (AUX_OUTLET_TYPES_PROPERTY->items + 1)
+#define AUX_OUTLET_TYPE_3_ITEM (AUX_OUTLET_TYPES_PROPERTY->items + 2)
+#define AUX_OUTLET_TYPE_4_ITEM (AUX_OUTLET_TYPES_PROPERTY->items + 3)
+
 #define AUX_GPIO_OUTLET_PROPERTY      (PRIVATE_DATA->gpio_outlet_property)
 #define AUX_GPIO_OUTLET_1_ITEM        (AUX_GPIO_OUTLET_PROPERTY->items + 0)
 #define AUX_GPIO_OUTLET_2_ITEM        (AUX_GPIO_OUTLET_PROPERTY->items + 1)
@@ -70,14 +88,18 @@
 #define AUX_OUTLET_PULSE_LENGTHS_4_ITEM        (AUX_OUTLET_PULSE_LENGTHS_PROPERTY->items + 3)
 
 #define AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY         (PRIVATE_DATA->gpio_outlet_frequencies_property)
-#define AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_1_ITEM    (AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->items + 0)
-#define AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_2_ITEM    (AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->items + 1)
+#define AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_1_ITEM (AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->items + 0)
+#define AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_2_ITEM (AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->items + 1)
+#define AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_3_ITEM (AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->items + 2)
+#define AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_4_ITEM (AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->items + 3)
 
 #define AUX_GPIO_OUTLET_DUTY_PROPERTY          (PRIVATE_DATA->gpio_outlet_duty_property)
 #define AUX_GPIO_OUTLET_DUTY_OUTLET_1_ITEM     (AUX_GPIO_OUTLET_DUTY_PROPERTY->items + 0)
 #define AUX_GPIO_OUTLET_DUTY_OUTLET_2_ITEM     (AUX_GPIO_OUTLET_DUTY_PROPERTY->items + 1)
+#define AUX_GPIO_OUTLET_DUTY_OUTLET_3_ITEM     (AUX_GPIO_OUTLET_DUTY_PROPERTY->items + 2)
+#define AUX_GPIO_OUTLET_DUTY_OUTLET_4_ITEM     (AUX_GPIO_OUTLET_DUTY_PROPERTY->items + 3)
 
-typedef struct {
+	typedef struct {
 
 } logical_device_data;
 
@@ -86,7 +108,10 @@ typedef struct {
 	int count_open;
 	bool udp;
 	pthread_mutex_t port_mutex;
-	bool pwm_present;
+	//bool pwm_present;
+	bool pwm_enabled[4];
+	int pwm_freq[4];
+	int pwm_duty[4];
 
 	bool relay_active[4];
 	indigo_timer *relay_timers[4];
@@ -94,6 +119,7 @@ typedef struct {
 	indigo_timer *pwm_settings_timer;
 
 	indigo_property *outlet_names_property,
+					*outlet_types_property,
 	                *gpio_outlet_property,
 	                *gpio_outlet_pulse_property,
 	                *gpio_outlet_frequencies_property,
@@ -110,408 +136,177 @@ static asiair_device_data device_data = {0};
 static void create_device();
 static void delete_device();
 
+static int pi = -1; /* pigpio handle */
+static int output_pins[] = {12, 13, 26, 18};
 
-static int output_pins[] = {12, 13, 26, 18}; /* 12 -> PWM0, 18 -> PWM1 */
-
-static bool asiair_pwm_present() {
+static bool asiair_connect_pigpiod() {
+	pi = pigpio_start(NULL, NULL);
 	struct stat sb;
-	if (stat("/sys/class/pwm/pwmchip0", &sb) == 0 && S_ISDIR(sb.st_mode)) {
-		INDIGO_DRIVER_DEBUG(DRIVER_NAME, "PWM is present");
+	if (pi >= 0) {
+		INDIGO_DRIVER_DEBUG(DRIVER_NAME, "pigpiod is running.");
 		return true;
 	} else {
-		INDIGO_DRIVER_DEBUG(DRIVER_NAME, "No PWM present");
+		INDIGO_DRIVER_DEBUG(DRIVER_NAME, "pigpiod not running.");
 		return false;
 	}
 }
 
-static bool asiair_pwm_export(int channel) {
-	char buffer[10];
-	ssize_t bytes_written;
-	int fd;
-
-	fd = open("/sys/class/pwm/pwmchip0/export", O_WRONLY);
-	if (fd < 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to open export for writing!");
-		return false;
+static bool asiair_set_pin_mode(int pin, bool output)
+{
+	if (output)
+	{
+		if (set_mode(pi, pin, PI_OUTPUT) < 0)
+		{
+			INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to set gpio%d for output", pin);
+			return false;
+		}
+		if (set_pull_up_down(pi, pin, PI_PUD_OFF) < 0)
+		{
+			INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to set gpio%d pull up/down", pin);
+			return false;
+		}
 	}
-	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "EXPORT pwm Channel = %d", channel);
-	bytes_written = snprintf(buffer, 10, "%d", channel);
-	write(fd, buffer, bytes_written);
-	close(fd);
+	else
+	{
+		if (set_mode(pi, pin, PI_INPUT) < 0)
+		{
+			INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to set gpio%d for input", pin);
+			return false;
+		}
+		if (set_pull_up_down(pi, pin, PI_PUD_UP) < 0)
+		{
+			INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to set gpio%d pull up/down", pin);
+			return false;
+		}
+	}
 	return true;
 }
 
-
-static bool asiair_pwm_unexport(int channel) {
-	char buffer[10];
-	ssize_t bytes;
-	int fd;
-
-	fd = open("/sys/class/pwm/pwmchip0/unexport", O_WRONLY);
-	if (fd == -1) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to open unexport for writing!");
-		return false;
+bool asiair_init_pins()
+{
+	// set pins to output mode
+	for (int i = 0; i < 4; i++)
+	{
+		if (!asiair_set_pin_mode(output_pins[i], true))
+			return false;
 	}
-
-	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "UNEXPORT PWM Channel = %d", channel);
-	bytes = snprintf(buffer, 10, "%d", channel);
-	write(fd, buffer, bytes);
-	close(fd);
+	indigo_usleep(1000);
 	return true;
 }
 
-
-static int asiair_pwm_get_enable(int channel, int *value) {
-	char path[255];
-	char value_str[3];
-	int fd;
-
-	if (value == NULL) return false;
-
-	sprintf(path, "/sys/class/pwm/pwmchip0/pwm%d/enable", channel);
-	fd = open(path, O_RDONLY);
-	if (fd < 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to open PWM channel %d value for reading", channel);
-		return false;
+bool asiair_deinit_pins()
+{
+	// set pins to input mode
+	for (int i = 0; i < 4; i++)
+	{
+		if (!asiair_set_pin_mode(output_pins[i], false))
+			return false;
 	}
-
-	if (read(fd, value_str, 3) < 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to read value!");
-		close(fd);
-		return false;
-	}
-	close(fd);
-	*value = atoi(value_str);
+	indigo_usleep(1000);
 	return true;
 }
 
-
-static bool asiair_pwm_set_enable(int channel, int value) {
-	char path[255];
-	int fd;
-
-	sprintf(path, "/sys/class/pwm/pwmchip0/pwm%d/enable", channel);
-	fd = open(path, O_WRONLY);
-	if (fd < 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to open PWM channel %d value for writing", channel);
+static bool asiair_pwm_get(int pin, int *pwm_frequency, int *duty_cycle) {
+	*pwm_frequency = get_PWM_frequency(pi, pin); // frequency in Hz
+	if (*pwm_frequency < 0) {
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to get PWM pwm_frequency for pin %d", pin);
 		return false;
 	}
-
-	char val = value ? '1' : '0';
-	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "Value = %d (%c) channel = %d", value, val, channel);
-	if (write(fd, &val, 1) != 1) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to write value!");
-		close(fd);
-		return false;
+	*duty_cycle = get_PWM_dutycycle(pi, pin);
+	if (*duty_cycle == PI_NOT_PWM_GPIO) {
+		*duty_cycle = gpio_read(pi, pin);
+		if (*duty_cycle < 0) {
+			INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to get PWM duty cycle for pin %d, error %d", pin, *duty_cycle);
+			return false;
+		}
+		*duty_cycle = *duty_cycle * 100;
 	}
-	close(fd);
+	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "asiair_pwm_get freq = %d, duty = %d, gpio = %d", *pwm_frequency, *duty_cycle, pin);
 	return true;
 }
 
-
-static bool asiair_pwm_set(int channel, int period, int duty_cycle) {
-	char path[255];
-	char buf[100];
-	int fd;
-
-	sprintf(path, "/sys/class/pwm/pwmchip0/pwm%d/duty_cycle", channel);
-	fd = open(path, O_WRONLY);
-	if (fd < 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to open PWM channel %d duty_cycle for writing", channel);
+static bool asiair_pwm_read(int pin, int *value)
+{
+	if (value == NULL)
 		return false;
-	}
 
-	sprintf(buf, "%d", 0);
-	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "Clear duty_cycle = %d channel = %d", duty_cycle, channel);
-	if (write(fd, buf, strlen(buf)) <= 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to clear PWM duty_cycle for channel %d!", channel);
-		close(fd);
-	}
-	close(fd);
-
-	sprintf(path, "/sys/class/pwm/pwmchip0/pwm%d/period", channel);
-	fd = open(path, O_WRONLY);
-	if (fd < 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to open PWM channel %d period for writing", channel);
-		return false;
-	}
-
-	sprintf(buf, "%d", period);
-	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "Set period = %d channel = %d", period, channel);
-	if (write(fd, buf, strlen(buf)) <= 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to set PWM period for channel %d!", channel);
-		close(fd);
-		return false;
-	}
-	close(fd);
-
-	sprintf(path, "/sys/class/pwm/pwmchip0/pwm%d/duty_cycle", channel);
-	fd = open(path, O_WRONLY);
-	if (fd < 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to open PWM channel %d duty_cycle for writing", channel);
-		return false;
-	}
-
-	sprintf(buf, "%d", duty_cycle);
-	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "Set duty_cycle = %d channel = %d", duty_cycle, channel);
-	if (write(fd, buf, strlen(buf)) <= 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to set PWM duty_cycle for channel %d!", channel);
-		close(fd);
-		return false;
-	}
-	close(fd);
+	int frequency, duty_cycle;
+	if (!asiair_pwm_get(pin, &frequency, &duty_cycle)) return false;
+	*value = duty_cycle;
 	return true;
 }
 
-static bool asiair_pwm_get(int channel, int *period, int *duty_cycle) {
-	char path[255];
-	char buf[100];
-	int fd;
-
-	sprintf(path, "/sys/class/pwm/pwmchip0/pwm%d/period", channel);
-	fd = open(path, O_RDONLY);
-	if (fd < 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to open PWM channel %d period for reading", channel);
+static bool asiair_pwm_write(int pin, int pwm_frequency, int duty_cycle)
+{
+	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "PWM set frequency = %d, duty_cycle = %d gpio = %d", pwm_frequency, duty_cycle, pin);
+	if (set_PWM_range(pi, pin, 100) < 0)
+	{
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to set PWM range for pin %d", pin);
 		return false;
 	}
-	if (read(fd, buf, sizeof(buf)) <= 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to get PWM period for channel %d!", channel);
-		close(fd);
+	if (set_PWM_frequency(pi, pin, pwm_frequency) < 0)
+	{
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to set PWM frequency for pin %d", pin);
 		return false;
 	}
-	*period = atoi(buf);
-	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "Got period = %d channel = %d", *period, channel);
-	close(fd);
-
-	sprintf(path, "/sys/class/pwm/pwmchip0/pwm%d/duty_cycle", channel);
-	fd = open(path, O_RDONLY);
-	if (fd < 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to open PWM channel %d duty_cycle for reading", channel);
-		return false;
-	}
-
-	if (read(fd, buf, sizeof(buf)) <= 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to get PWM duty_cycle for channel %d!", channel);
-		close(fd);
-		return false;
-	}
-	*duty_cycle = atoi(buf);
-	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "Got duty_cycle = %d channel = %d", *duty_cycle, channel);
-	close(fd);
-	return true;
-}
-
-
-static bool asiair_pin_export(int pin) {
-	char buffer[10];
-	ssize_t bytes_written;
-	int fd;
-	char path[256];
-	struct stat sb = {0};
-
-	sprintf(path, "/sys/class/gpio/gpio%d", pin);
-	if (stat(path, &sb) == 0 && (S_ISDIR(sb.st_mode))) {
-		INDIGO_DRIVER_DEBUG(DRIVER_NAME, "Pin #%d already exported!", pin);
-		return true;
-	}
-
-	fd = open("/sys/class/gpio/export", O_WRONLY);
-	if (fd < 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to open export for writing!");
-		return false;
-	}
-	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "EXPORT pin = %d", pin);
-	bytes_written = snprintf(buffer, 10, "%d", pin);
-	write(fd, buffer, bytes_written);
-	close(fd);
-	return true;
-}
-
-
-static bool asiair_pin_unexport(int pin) {
-	char buffer[10];
-	ssize_t bytes;
-	int fd;
-
-	fd = open("/sys/class/gpio/unexport", O_WRONLY);
-	if (fd == -1) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to open unexport for writing!");
-		return false;
-	}
-
-	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "UNEXPORT Pin = %d", pin);
-	bytes = snprintf(buffer, 10, "%d", pin);
-	write(fd, buffer, bytes);
-	close(fd);
-	return true;
-}
-
-
-static bool asiair_get_pin_direction(int pin, bool *input) {
-	char path[255];
-	char direction_str[32] = {0};
-	int fd;
-
-	if (input == NULL) return false;
-
-	sprintf(path, "/sys/class/gpio/gpio%d/direction", pin);
-	fd = open(path, O_RDONLY);
-	if (fd < 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to open gpio%d direction for reading", pin);
-		return false;
-	}
-
-	if (read(fd, direction_str, 3) < 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to read direction!\n");
-		close(fd);
-		return false;
-	}
-	close(fd);
-	if (direction_str[0] == 'i') {
-		*input = true;
-	} else if (direction_str[0] == 'o') {
-		*input = false;
-	} else {
+	int status = set_PWM_dutycycle(pi, pin, duty_cycle);
+	if (status < 0)
+	{
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to set PWM duty cycle for pin %d, error %d", pin, status);
 		return false;
 	}
 	return true;
 }
 
-
-static bool asiair_set_output(int pin) {
-	char path[256];
-	int fd;
-	bool is_input = false;
-
-	if (asiair_get_pin_direction(pin, &is_input) && !is_input) {
-		INDIGO_DRIVER_DEBUG(DRIVER_NAME, "Pin gpio%d direction is already output", pin);
-		return true;
-	}
-
-	sprintf(path, "/sys/class/gpio/gpio%d/direction", pin);
-	fd = open(path, O_WRONLY);
-	if (fd < 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to open gpio%d direction for writing", pin);
+static bool asiair_pin_read(int pin, int *value)
+{
+	if (value == NULL)
 		return false;
-	}
 
-	if (write(fd, "out", 3) < 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to set direction!");
-		close(fd);
-		return false;
-	}
-
-	close(fd);
+	*value = gpio_read(pi, pin);
+	if (*value < 0)
+		/* PI_BAD_GPIO */
+		{
+			INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to read value from pin %d!", pin);
+			return false;
+		}
 	return true;
 }
-
-
-static int asiair_pin_read(int pin, int *value) {
-	char path[255];
-	char value_str[3];
-	int fd;
-
-	if (value == NULL) return false;
-
-	sprintf(path, "/sys/class/gpio/gpio%d/value", pin);
-	fd = open(path, O_RDONLY);
-	if (fd < 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to open gpio%d value for reading", pin);
-		return false;
-	}
-
-	if (read(fd, value_str, 3) < 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to read value!\n");
-		close(fd);
-		return false;
-	}
-	close(fd);
-	*value = atoi(value_str);
-	return true;
-}
-
 
 static bool asiair_pin_write(int pin, int value) {
-	char path[255];
-	int fd;
-
-	sprintf(path, "/sys/class/gpio/gpio%d/value", pin);
-	fd = open(path, O_WRONLY);
-	if (fd < 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to open gpio%d value for writing", pin);
+	if (gpio_write(pi, pin, value) < 0)
+	{
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to write value to pin %d!", pin);
 		return false;
 	}
-
-	char val = value ? '1' : '0';
-	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "Value = %d (%c) pin = %d", value, val, pin);
-	if (write(fd, &val, 1) != 1) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to write value!");
-		close(fd);
-		return false;
-	}
-
-	close(fd);
 	return true;
 }
 
-static bool asiair_set_output_line(uint16_t line, int value, bool use_pwm) {
+static bool asiair_set_output_line(indigo_device *device, uint16_t line, int value)
+{
 	if (line >= 4) return false;
-	if (use_pwm && line == 0) {
-		return asiair_pwm_set_enable(0, value);
-	} else if(use_pwm && line == 3) {
-		return asiair_pwm_set_enable(1, value);
-	} else {
+	if (PRIVATE_DATA->pwm_enabled[line])
+	{
+		int duty = 0;
+		if (value>0)
+			duty = (AUX_GPIO_OUTLET_DUTY_PROPERTY->items + line)->number.value;
+		return asiair_pwm_write(output_pins[line], (AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->items + line)->number.value, duty);
+		//return asiair_pwm_write(output_pins[line], PRIVATE_DATA->pwm_freq[line], value);
+	}
+	else
+	{
 		return asiair_pin_write(output_pins[line], value);
 	}
 }
 
-static bool asiair_read_output_lines(int *values, bool use_pwm) {
-	if (use_pwm) {
-		if (!asiair_pwm_get_enable(0, &values[0])) return false;
-		if (!asiair_pwm_get_enable(1, &values[3])) return false;
-		if (!asiair_pin_read(output_pins[1], &values[1])) return false;
-		if (!asiair_pin_read(output_pins[2], &values[2])) return false;
-	} else {
-		for (int i = 0; i < 4; i++) {
-			if (!asiair_pin_read(output_pins[i], &values[i])) return false;
-		}
-	}
-	return true;
-}
-
-bool asiair_export_all(bool use_pwm) {
-	if (use_pwm) {
-		if (!asiair_pwm_export(0)) return false;
-		if (!asiair_pwm_export(1)) return false;
-		if (!asiair_pin_export(output_pins[1])) return false;
-		if (!asiair_pin_export(output_pins[2])) return false;
-	} else {
-		for (int i = 0; i < 4; i++) {
-			if (!asiair_pin_export(output_pins[i])) return false;
-		}
-	}
-	indigo_usleep(1000000);
-	if (use_pwm) {
-		if (!asiair_set_output(output_pins[1])) return false;
-		if (!asiair_set_output(output_pins[2])) return false;
-	} else {
-		for (int i = 0; i < 4; i++) {
-			if (!asiair_set_output(output_pins[i])) return false;
-		}
-	}
-	return true;
-}
-
-bool asiair_unexport_all(bool use_pwm) {
-	int first = 0;
-	if (use_pwm) {
-		if (!asiair_pwm_unexport(0)) return false;
-		if (!asiair_pwm_unexport(1)) return false;
-		if (!asiair_pin_unexport(output_pins[1])) return false;
-		if (!asiair_pin_unexport(output_pins[2])) return false;
-	} else {
-		for (int i = 0; i < 4; i++) {
-			if (!asiair_pin_unexport(output_pins[i])) return false;
+static bool asiair_read_output_lines(indigo_device * device, int *relay)
+{
+	for (int i = 0; i < 4; i++) {
+		if (PRIVATE_DATA->pwm_enabled[i]) {
+			if (!asiair_pwm_read(output_pins[i], &relay[i])) return false;
+			if (relay[i] > 0) relay[i] = 1; /*when PWM is enabled set relay to "on"*/
+		} else {
+			if (!asiair_pin_read(output_pins[i], &relay[i])) return false;
 		}
 	}
 	return true;
@@ -535,6 +330,14 @@ static int asiair_init_properties(indigo_device *device) {
 	indigo_init_text_item(AUX_OUTLET_NAME_3_ITEM, AUX_GPIO_OUTLET_NAME_3_ITEM_NAME, "Output 3", "Power #3");
 	indigo_init_text_item(AUX_OUTLET_NAME_4_ITEM, AUX_GPIO_OUTLET_NAME_4_ITEM_NAME, "Output 4", "Power #4");
 	// -------------------------------------------------------------------------------- GPIO OUTLETS
+	AUX_OUTLET_TYPES_PROPERTY = indigo_init_switch_property(NULL, device->name, AUX_OUTLET_TYPES_PROPERTY_NAME, AUX_RELAYS_GROUP, "Enable PWM", INDIGO_OK_STATE, INDIGO_RW_PERM, INDIGO_ANY_OF_MANY_RULE,4);
+	if (AUX_OUTLET_TYPES_PROPERTY == NULL)
+		return INDIGO_FAILED;
+	indigo_init_text_item(AUX_OUTLET_TYPE_1_ITEM, AUX_OUTLET_TYPE_1_ITEM_NAME, "PWM 1", false);
+	indigo_init_text_item(AUX_OUTLET_TYPE_2_ITEM, AUX_OUTLET_TYPE_2_ITEM_NAME, "PWM 2", false);
+	indigo_init_text_item(AUX_OUTLET_TYPE_3_ITEM, AUX_OUTLET_TYPE_3_ITEM_NAME, "PWM 3", false);
+	indigo_init_text_item(AUX_OUTLET_TYPE_4_ITEM, AUX_OUTLET_TYPE_4_ITEM_NAME, "PWM 4", false);
+	// -------------------------------------------------------------------------------- GPIO OUTLETS
 	AUX_GPIO_OUTLET_PROPERTY = indigo_init_switch_property(NULL, device->name, AUX_GPIO_OUTLETS_PROPERTY_NAME, AUX_RELAYS_GROUP, "Outputs", INDIGO_OK_STATE, INDIGO_RW_PERM, INDIGO_ANY_OF_MANY_RULE, 4);
 	if (AUX_GPIO_OUTLET_PROPERTY == NULL)
 		return INDIGO_FAILED;
@@ -551,51 +354,72 @@ static int asiair_init_properties(indigo_device *device) {
 	indigo_init_number_item(AUX_OUTLET_PULSE_LENGTHS_3_ITEM, AUX_GPIO_OUTLETS_OUTLET_3_ITEM_NAME, "Output #3", 0, 100000, 100, 0);
 	indigo_init_number_item(AUX_OUTLET_PULSE_LENGTHS_4_ITEM, AUX_GPIO_OUTLETS_OUTLET_4_ITEM_NAME, "Output #4", 0, 100000, 100, 0);
 	// -------------------------------------------------------------------------------- AUX_GPIO_OUTLET_FREQUENCIES
-	AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY = indigo_init_number_property(NULL, device->name, AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY_NAME, AUX_RELAYS_GROUP, "PWM Frequencies (Hz)", INDIGO_OK_STATE, INDIGO_RW_PERM, 2);
+	AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY = indigo_init_number_property(NULL, device->name, AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY_NAME, AUX_RELAYS_GROUP, "PWM Frequencies (Hz)", INDIGO_OK_STATE, INDIGO_RW_PERM, 4);
 	if (AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY == NULL)
 		return INDIGO_FAILED;
 	indigo_init_number_item(AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_1_ITEM, AUX_GPIO_OUTLETS_OUTLET_1_ITEM_NAME, "Output #1", 0.5, 1000000, 100, 100);
 	indigo_init_number_item(AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_2_ITEM, AUX_GPIO_OUTLETS_OUTLET_2_ITEM_NAME, "Output #2", 0.5, 1000000, 100, 100);
+	indigo_init_number_item(AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_3_ITEM, AUX_GPIO_OUTLETS_OUTLET_3_ITEM_NAME, "Output #3", 0.5, 1000000, 100, 100);
+	indigo_init_number_item(AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_4_ITEM, AUX_GPIO_OUTLETS_OUTLET_4_ITEM_NAME, "Output #4", 0.5, 1000000, 100, 100);
 	// -------------------------------------------------------------------------------- AUX_GPIO_OUTLET_DUTY_CYCLES
-	AUX_GPIO_OUTLET_DUTY_PROPERTY = indigo_init_number_property(NULL, device->name, AUX_GPIO_OUTLET_DUTY_PROPERTY_NAME, AUX_RELAYS_GROUP, "PWM Duty cycles (%)", INDIGO_OK_STATE, INDIGO_RW_PERM, 2);
+	//AUX_GPIO_OUTLET_DUTY_PROPERTY = indigo_init_number_property(NULL, device->name, AUX_GPIO_OUTLET_DUTY_PROPERTY_NAME, AUX_RELAYS_GROUP, "PWM Duty cycles (%)", INDIGO_OK_STATE, INDIGO_RW_PERM, 4);
+	AUX_GPIO_OUTLET_DUTY_PROPERTY = indigo_init_number_property(NULL, device->name, AUX_HEATER_OUTLET_PROPERTY_NAME, AUX_RELAYS_GROUP, "PWM Duty cycles (%)", INDIGO_OK_STATE, INDIGO_RW_PERM, 4);
 	if (AUX_GPIO_OUTLET_DUTY_PROPERTY == NULL)
 		return INDIGO_FAILED;
 	indigo_init_number_item(AUX_GPIO_OUTLET_DUTY_OUTLET_1_ITEM, AUX_GPIO_OUTLETS_OUTLET_1_ITEM_NAME, "Output #1", 0, 100, 1, 100);
 	indigo_init_number_item(AUX_GPIO_OUTLET_DUTY_OUTLET_2_ITEM, AUX_GPIO_OUTLETS_OUTLET_2_ITEM_NAME, "Output #2", 0, 100, 1, 100);
+	indigo_init_number_item(AUX_GPIO_OUTLET_DUTY_OUTLET_3_ITEM, AUX_GPIO_OUTLETS_OUTLET_3_ITEM_NAME, "Output #3", 0, 100, 1, 100);
+	indigo_init_number_item(AUX_GPIO_OUTLET_DUTY_OUTLET_4_ITEM, AUX_GPIO_OUTLETS_OUTLET_4_ITEM_NAME, "Output #4", 0, 100, 1, 100);
 	//---------------------------------------------------------------------------
 	return INDIGO_OK;
 }
 
+static bool update_pwm_properties(indigo_device *device)
+{
+	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "update_pwm_properties called");
 
-static void pwm_settings_timer_callback(indigo_device *device) {
-	if (PRIVATE_DATA->pwm_present) {
-		int period, duty_cycle;
-		if (!asiair_pwm_get(0, &period, &duty_cycle)) {
-			AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->state = INDIGO_ALERT_STATE;
-			AUX_GPIO_OUTLET_DUTY_PROPERTY->state = INDIGO_ALERT_STATE;
-		} else {
-			AUX_GPIO_OUTLET_DUTY_OUTLET_1_ITEM->number.value = AUX_GPIO_OUTLET_DUTY_OUTLET_1_ITEM->number.target = (double)(duty_cycle) / period * 100;
-			AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_1_ITEM->number.value = AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_1_ITEM->number.target = 1 / (period / 1e9);
-		}
-		if (!asiair_pwm_get(1, &period, &duty_cycle)) {
-			AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->state = INDIGO_ALERT_STATE;
-			AUX_GPIO_OUTLET_DUTY_PROPERTY->state = INDIGO_ALERT_STATE;
-		} else {
-			AUX_GPIO_OUTLET_DUTY_OUTLET_2_ITEM->number.value = AUX_GPIO_OUTLET_DUTY_OUTLET_2_ITEM->number.target = (double)(duty_cycle) / period * 100;
-			AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_2_ITEM->number.value = AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_2_ITEM->number.target = 1 / (period / 1e9);
+	int relay_value[4];
+	if (!asiair_read_output_lines(device, relay_value))
+	{
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "asiair_pin_read(%d) failed", PRIVATE_DATA->handle);
+		return false;
+	}
+
+	int pwm_frequency, duty_cycle;
+	for (int i = 0; i < 4; i++)
+	{
+		if ((relay_value[i] > 0) && PRIVATE_DATA->pwm_enabled[i])
+		{
+			if (!asiair_pwm_get(output_pins[i], &pwm_frequency, &duty_cycle))
+			{
+				AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->state = INDIGO_ALERT_STATE;
+				AUX_GPIO_OUTLET_DUTY_PROPERTY->state = INDIGO_ALERT_STATE;
+				return false;
+			}
+			else
+			{
+				(AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->items + i)->number.value = (AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->items + i)->number.target = pwm_frequency;
+				(AUX_GPIO_OUTLET_DUTY_PROPERTY->items + i)->number.value = (AUX_GPIO_OUTLET_DUTY_PROPERTY->items + i)->number.target = duty_cycle;
+			}
 		}
 	}
 
 	indigo_update_property(device, AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY, NULL);
 	indigo_update_property(device, AUX_GPIO_OUTLET_DUTY_PROPERTY, NULL);
-	indigo_reschedule_timer(device, 1, &PRIVATE_DATA->pwm_settings_timer);
+	return true;
 }
 
+// static void pwm_settings_timer_callback(indigo_device *device)
+// {
+// 	update_pwm_properties(device);
+// 	indigo_reschedule_timer(device, 1, &PRIVATE_DATA->pwm_settings_timer);
+// }
 
 static void relay_1_timer_callback(indigo_device *device) {
+	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "relay timer callback called");
 	pthread_mutex_lock(&PRIVATE_DATA->relay_mutex);
 	PRIVATE_DATA->relay_active[0] = false;
-	asiair_set_output_line(0, 0, PRIVATE_DATA->pwm_present);
+	asiair_set_output_line(device, 0, 0);
 	AUX_GPIO_OUTLET_1_ITEM->sw.value = false;
 	indigo_update_property(device, AUX_GPIO_OUTLET_PROPERTY, NULL);
 	pthread_mutex_unlock(&PRIVATE_DATA->relay_mutex);
@@ -604,7 +428,7 @@ static void relay_1_timer_callback(indigo_device *device) {
 static void relay_2_timer_callback(indigo_device *device) {
 	pthread_mutex_lock(&PRIVATE_DATA->relay_mutex);
 	PRIVATE_DATA->relay_active[1] = false;
-	asiair_set_output_line(1, 0, PRIVATE_DATA->pwm_present);
+	asiair_set_output_line(device, 1, 0);
 	AUX_GPIO_OUTLET_2_ITEM->sw.value = false;
 	indigo_update_property(device, AUX_GPIO_OUTLET_PROPERTY, NULL);
 	pthread_mutex_unlock(&PRIVATE_DATA->relay_mutex);
@@ -613,7 +437,7 @@ static void relay_2_timer_callback(indigo_device *device) {
 static void relay_3_timer_callback(indigo_device *device) {
 	pthread_mutex_lock(&PRIVATE_DATA->relay_mutex);
 	PRIVATE_DATA->relay_active[2] = false;
-	asiair_set_output_line(2, 0, PRIVATE_DATA->pwm_present);
+	asiair_set_output_line(device, 2, 0);
 	AUX_GPIO_OUTLET_3_ITEM->sw.value = false;
 	indigo_update_property(device, AUX_GPIO_OUTLET_PROPERTY, NULL);
 	pthread_mutex_unlock(&PRIVATE_DATA->relay_mutex);
@@ -622,7 +446,7 @@ static void relay_3_timer_callback(indigo_device *device) {
 static void relay_4_timer_callback(indigo_device *device) {
 	pthread_mutex_lock(&PRIVATE_DATA->relay_mutex);
 	PRIVATE_DATA->relay_active[3] = false;
-	asiair_set_output_line(3, 0, PRIVATE_DATA->pwm_present);
+	asiair_set_output_line(device, 3, 0);
 	AUX_GPIO_OUTLET_4_ITEM->sw.value = false;
 	indigo_update_property(device, AUX_GPIO_OUTLET_PROPERTY, NULL);
 	pthread_mutex_unlock(&PRIVATE_DATA->relay_mutex);
@@ -637,40 +461,117 @@ static void (*relay_timer_callbacks[])(indigo_device*) = {
 	relay_4_timer_callback,
 };
 
-
-static bool set_gpio_outlets(indigo_device *device) {
-	bool success = true;
+static bool set_pwm_properties(indigo_device *device)
+{
 	int relay_value[4];
 
-	if (!asiair_read_output_lines(relay_value, PRIVATE_DATA->pwm_present)) {
+	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "set_pwm_properties called");
+
+	if (!asiair_read_output_lines(device, relay_value))
+	{
 		INDIGO_DRIVER_ERROR(DRIVER_NAME, "asiair_pin_read(%d) failed", PRIVATE_DATA->handle);
 		return false;
 	}
 
-	for (int i = 0; i < 4; i++) {
-		if ((AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value != relay_value[i]) {
-			if (((AUX_OUTLET_PULSE_LENGTHS_PROPERTY->items + i)->number.value > 0) && (AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value && !PRIVATE_DATA->relay_active[i]) {
-				if (!asiair_set_output_line(i, (int)(AUX_OUTLET_PULSE_LENGTHS_PROPERTY->items + i)->number.value, PRIVATE_DATA->pwm_present)) {
+	for (int i = 0; i < 4; i++)
+	{
+		if ((relay_value[i] > 0) && PRIVATE_DATA->pwm_enabled[i])
+		{
+			if (!asiair_pwm_write(output_pins[i], (AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->items + i)->number.value, (AUX_GPIO_OUTLET_DUTY_PROPERTY->items + i)->number.value)) return false;
+		}
+	}
+	return update_pwm_properties(device);
+}
+
+static bool set_gpio_outlets(indigo_device *device)
+{
+	bool success = true;
+	int relay_value[4];
+	
+	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "set_gpio_outlets called");
+
+	if (!asiair_read_output_lines(device, relay_value))
+	{
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "asiair_pin_read(%d) failed", PRIVATE_DATA->handle);
+		return false;
+	}
+
+	for (int i = 0; i < 4; i++)
+	{
+		if ((AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value != relay_value[i])
+		{
+			if (((AUX_OUTLET_PULSE_LENGTHS_PROPERTY->items + i)->number.value > 0) && (AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value && !PRIVATE_DATA->relay_active[i])
+			{
+				INDIGO_DRIVER_DEBUG(DRIVER_NAME, "set_gpio_outlets called, in relay timer workflow");
+				if (!asiair_set_output_line(device, i, (int)(AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value))
+				{
 					INDIGO_DRIVER_ERROR(DRIVER_NAME, "asiair_pin_write(%d) failed, did you authorize?", PRIVATE_DATA->handle);
 					success = false;
-				} else {
-					PRIVATE_DATA->relay_active[i] = true;
-					indigo_set_timer(device, ((AUX_OUTLET_PULSE_LENGTHS_PROPERTY->items + i)->number.value)/1000.0, relay_timer_callbacks[i], &PRIVATE_DATA->relay_timers[i]);
 				}
-			} else if ((AUX_OUTLET_PULSE_LENGTHS_PROPERTY->items + i)->number.value == 0 || (!(AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value && !PRIVATE_DATA->relay_active[i])) {
-				if (!asiair_set_output_line(i, (int)(AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value, PRIVATE_DATA->pwm_present)) {
+				else
+				{
+					PRIVATE_DATA->relay_active[i] = true;
+					indigo_set_timer(device, ((AUX_OUTLET_PULSE_LENGTHS_PROPERTY->items + i)->number.value) / 1000.0, relay_timer_callbacks[i], &PRIVATE_DATA->relay_timers[i]);
+				}
+			}
+			else if ((AUX_OUTLET_PULSE_LENGTHS_PROPERTY->items + i)->number.value == 0 || (!(AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value && !PRIVATE_DATA->relay_active[i]))
+			{
+				INDIGO_DRIVER_DEBUG(DRIVER_NAME, "set_gpio_outlets called, standard workflow switch = %d", (int)(AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value);
+				if (!asiair_set_output_line(device, i, (int)(AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value))
+				{
 					INDIGO_DRIVER_ERROR(DRIVER_NAME, "asiair_pin_write(%d) failed, did you authorize?", PRIVATE_DATA->handle);
 					success = false;
 				}
 			}
 		}
 	}
-	return success;
+	return success && update_pwm_properties(device);
 }
 
+static bool set_gpio_types(indigo_device *device)
+{
+	int relay_value[4];
+
+	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "set_gpio_types called");
+
+	if (!asiair_read_output_lines(device, relay_value))
+	{
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "asiair_pin_read(%d) failed", PRIVATE_DATA->handle);
+		return false;
+	}
+
+	for (int i = 0; i < 4; i++)
+	{
+		if (PRIVATE_DATA->pwm_enabled[i] != (AUX_OUTLET_TYPES_PROPERTY->items + i)->sw.value) {
+			PRIVATE_DATA->pwm_enabled[i] = (AUX_OUTLET_TYPES_PROPERTY->items + i)->sw.value;
+			if (!PRIVATE_DATA->pwm_enabled[i])
+			{
+				//was PWM, now set to digital
+				INDIGO_DRIVER_DEBUG(DRIVER_NAME, "set_gpio_types called, disable PWM on pin %d", i);
+				if (relay_value[i] > 0)
+				{
+					asiair_pin_write(output_pins[i], 0); //disable PWM
+					(AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value = 0;
+				}
+			}
+			else
+			{
+				INDIGO_DRIVER_DEBUG(DRIVER_NAME, "set_gpio_types called, enable PWM on pin %d", i);
+				//was digital, now set to PWM when relay is on
+				if (relay_value[i] > 0)
+				{
+					if (!asiair_pwm_write(output_pins[i], (AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->items + i)->number.value, (AUX_GPIO_OUTLET_DUTY_PROPERTY->items + i)->number.value))
+						return false;
+				}
+			}
+		}
+	}
+	return update_pwm_properties(device);
+}
 
 static indigo_result aux_enumerate_properties(indigo_device *device, indigo_client *client, indigo_property *property) {
 	if (IS_CONNECTED) {
+		indigo_define_matching_property(AUX_OUTLET_TYPES_PROPERTY);
 		indigo_define_matching_property(AUX_GPIO_OUTLET_PROPERTY);
 		indigo_define_matching_property(AUX_OUTLET_PULSE_LENGTHS_PROPERTY);
 		indigo_define_matching_property(AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY);
@@ -698,82 +599,72 @@ static indigo_result aux_attach(indigo_device *device) {
 
 static void handle_aux_connect_property(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
-		PRIVATE_DATA->pwm_present = asiair_pwm_present();
-		if(PRIVATE_DATA->pwm_present) {
+		if (asiair_connect_pigpiod()) {
+			INDIGO_DRIVER_DEBUG(DRIVER_NAME, "connected after pigpiod connection");
 			AUX_GPIO_OUTLET_DUTY_PROPERTY->hidden = false;
 			AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->hidden = false;
-			indigo_send_message(device, "PWM on Outputs #1 and #4 is present");
-		} else {
-			AUX_GPIO_OUTLET_DUTY_PROPERTY->hidden = true;
-			AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->hidden = true;
-			indigo_send_message(device, "No PWM channels found");
-		}
-		if (asiair_export_all(PRIVATE_DATA->pwm_present)) {
-			char board[INDIGO_VALUE_SIZE] = "N/A";
-			char firmware[INDIGO_VALUE_SIZE] = "N/A";
-			indigo_copy_value(INFO_DEVICE_MODEL_ITEM->text.value, board);
-			indigo_copy_value(INFO_DEVICE_FW_REVISION_ITEM->text.value, firmware);
-			indigo_update_property(device, INFO_PROPERTY, NULL);
+			if (asiair_init_pins()) {
+				char board[INDIGO_VALUE_SIZE] = "N/A";
+				char firmware[INDIGO_VALUE_SIZE] = "N/A";
+				indigo_copy_value(INFO_DEVICE_MODEL_ITEM->text.value, board);
+				indigo_copy_value(INFO_DEVICE_FW_REVISION_ITEM->text.value, firmware);
+				indigo_update_property(device, INFO_PROPERTY, NULL);
 
-			int relay_value[4];
-			if (!asiair_read_output_lines(relay_value, PRIVATE_DATA->pwm_present)) {
-				INDIGO_DRIVER_ERROR(DRIVER_NAME, "asiair_pin_read(%d) failed", PRIVATE_DATA->handle);
-				AUX_GPIO_OUTLET_PROPERTY->state = INDIGO_ALERT_STATE;
-			} else {
-				if (PRIVATE_DATA->pwm_present) {
-					int period, duty_cycle;
-					period = (int)(1 / AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_1_ITEM->number.target * 1e9);
-					duty_cycle = (int)(period * AUX_GPIO_OUTLET_DUTY_OUTLET_1_ITEM->number.target / 100.0);
-					asiair_pwm_set(0, period, duty_cycle);
-					period = (int)(1 / AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_2_ITEM->number.target * 1e9);
-					duty_cycle = (int)(period * AUX_GPIO_OUTLET_DUTY_OUTLET_2_ITEM->number.target / 100.0);
-					asiair_pwm_set(1, period, duty_cycle);
-
-					/* Reset PWM lines if enabled */
-					if (relay_value[0] == 1) {
-						asiair_pwm_set_enable(0, false);
-						asiair_pwm_set_enable(0, true);
-					}
-					if (relay_value[3] == 1) {
-						asiair_pwm_set_enable(1, false);
-						asiair_pwm_set_enable(1, true);
-					}
-					AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->hidden = false;
-					AUX_GPIO_OUTLET_DUTY_PROPERTY->hidden = false;
+				// Initialize to current state of outlets
+				// TODO: PWM settings of active lines (Inactive lines loose PWM info.
+				int relay_value[4];
+				if (!asiair_read_output_lines(device, relay_value)) {
+					INDIGO_DRIVER_ERROR(DRIVER_NAME, "asiair_pin_read(%d) failed", PRIVATE_DATA->handle);
+					AUX_GPIO_OUTLET_PROPERTY->state = INDIGO_ALERT_STATE;
 				} else {
-					AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->hidden = true;
-					AUX_GPIO_OUTLET_DUTY_PROPERTY->hidden = true;
+					int pwm_frequency, duty_cycle;
+					for (int i = 0; i < 4; i++) {
+						(AUX_OUTLET_TYPES_PROPERTY->items + i)->sw.value = 0;
+						(AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value = relay_value[i];
+						PRIVATE_DATA->relay_active[i] = false;
+
+						//PRIVATE_DATA->pwm_freq[i] = (int)(AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->items + i)->number.target;
+						//PRIVATE_DATA->pwm_duty[i] = (int)(AUX_GPIO_OUTLET_DUTY_PROPERTY->items + i)->number.target;
+						//INDIGO_DRIVER_DEBUG(DRIVER_NAME, "connected before write, TODO check if needed");
+						//asiair_pwm_write(output_pins[i], PRIVATE_DATA->pwm_freq[i], PRIVATE_DATA->pwm_duty[i]);
+					}
 				}
 
-				for (int i = 0; i < 4; i++) {
-					(AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value = relay_value[i];
-					PRIVATE_DATA->relay_active[i] = false;
-				}
+				indigo_define_property(device, AUX_OUTLET_TYPES_PROPERTY, NULL);
+				indigo_define_property(device, AUX_GPIO_OUTLET_PROPERTY, NULL);
+				indigo_define_property(device, AUX_OUTLET_PULSE_LENGTHS_PROPERTY, NULL);
+				indigo_define_property(device, AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY, NULL);
+				indigo_define_property(device, AUX_GPIO_OUTLET_DUTY_PROPERTY, NULL);
+
+				//indigo_set_timer(device, 0, pwm_settings_timer_callback, &PRIVATE_DATA->pwm_settings_timer);
+
+				CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
+			} else {
+				CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
+				indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, false);
 			}
-
-			indigo_define_property(device, AUX_GPIO_OUTLET_PROPERTY, NULL);
-			indigo_define_property(device, AUX_OUTLET_PULSE_LENGTHS_PROPERTY, NULL);
-			indigo_define_property(device, AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY, NULL);
-			indigo_define_property(device, AUX_GPIO_OUTLET_DUTY_PROPERTY, NULL);
-			indigo_set_timer(device, 0, pwm_settings_timer_callback, &PRIVATE_DATA->pwm_settings_timer);
-			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
-		} else {
+		}
+		else
+		{
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, false);
-		}
+			INDIGO_DRIVER_ERROR(DRIVER_NAME, "Process pigpiod not running! Use 'sudo pigpiod' to start it.");
+		}	
 	} else {
 		indigo_update_property(device, CONNECTION_PROPERTY, NULL);
 		for (int i = 0; i < 4; i++) {
 			indigo_cancel_timer_sync(device, &PRIVATE_DATA->relay_timers[i]);
 		}
-		indigo_cancel_timer_sync(device, &PRIVATE_DATA->pwm_settings_timer);
-		asiair_unexport_all(PRIVATE_DATA->pwm_present);
+		//indigo_cancel_timer_sync(device, &PRIVATE_DATA->pwm_settings_timer);
+		asiair_deinit_pins();
+		indigo_delete_property(device, AUX_OUTLET_TYPES_PROPERTY, NULL);
 		indigo_delete_property(device, AUX_GPIO_OUTLET_PROPERTY, NULL);
 		indigo_delete_property(device, AUX_OUTLET_PULSE_LENGTHS_PROPERTY, NULL);
 		indigo_delete_property(device, AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY, NULL);
 		indigo_delete_property(device, AUX_GPIO_OUTLET_DUTY_PROPERTY, NULL);
 		CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 	}
+
 	indigo_aux_change_property(device, NULL, CONNECTION_PROPERTY);
 }
 
@@ -791,14 +682,20 @@ static indigo_result aux_change_property(indigo_device *device, indigo_client *c
 		indigo_set_timer(device, 0, handle_aux_connect_property, NULL);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(AUX_OUTLET_NAMES_PROPERTY, property)) {
-		// -------------------------------------------------------------------------------- X_AUX_OUTLET_NAMES
+		// -------------------------------------------------------------------------------- AUX_OUTLET_NAMES
 		indigo_property_copy_values(AUX_OUTLET_NAMES_PROPERTY, property, false);
 		if (IS_CONNECTED) {
+			indigo_delete_property(device, AUX_OUTLET_TYPES_PROPERTY, NULL);
 			indigo_delete_property(device, AUX_GPIO_OUTLET_PROPERTY, NULL);
 			indigo_delete_property(device, AUX_OUTLET_PULSE_LENGTHS_PROPERTY, NULL);
 			indigo_delete_property(device, AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY, NULL);
 			indigo_delete_property(device, AUX_GPIO_OUTLET_DUTY_PROPERTY, NULL);
 		}
+		snprintf(AUX_OUTLET_TYPE_1_ITEM->label, INDIGO_NAME_SIZE, "%s", AUX_OUTLET_NAME_1_ITEM->text.value);
+		snprintf(AUX_OUTLET_TYPE_2_ITEM->label, INDIGO_NAME_SIZE, "%s", AUX_OUTLET_NAME_2_ITEM->text.value);
+		snprintf(AUX_OUTLET_TYPE_3_ITEM->label, INDIGO_NAME_SIZE, "%s", AUX_OUTLET_NAME_3_ITEM->text.value);
+		snprintf(AUX_OUTLET_TYPE_4_ITEM->label, INDIGO_NAME_SIZE, "%s", AUX_OUTLET_NAME_4_ITEM->text.value);
+
 		snprintf(AUX_GPIO_OUTLET_1_ITEM->label, INDIGO_NAME_SIZE, "%s", AUX_OUTLET_NAME_1_ITEM->text.value);
 		snprintf(AUX_GPIO_OUTLET_2_ITEM->label, INDIGO_NAME_SIZE, "%s", AUX_OUTLET_NAME_2_ITEM->text.value);
 		snprintf(AUX_GPIO_OUTLET_3_ITEM->label, INDIGO_NAME_SIZE, "%s", AUX_OUTLET_NAME_3_ITEM->text.value);
@@ -811,12 +708,17 @@ static indigo_result aux_change_property(indigo_device *device, indigo_client *c
 
 		snprintf(AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_1_ITEM->label, INDIGO_NAME_SIZE, "%s", AUX_OUTLET_NAME_1_ITEM->text.value);
 		snprintf(AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_2_ITEM->label, INDIGO_NAME_SIZE, "%s", AUX_OUTLET_NAME_2_ITEM->text.value);
+		snprintf(AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_3_ITEM->label, INDIGO_NAME_SIZE, "%s", AUX_OUTLET_NAME_3_ITEM->text.value);
+		snprintf(AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_4_ITEM->label, INDIGO_NAME_SIZE, "%s", AUX_OUTLET_NAME_4_ITEM->text.value);
 
 		snprintf(AUX_GPIO_OUTLET_DUTY_OUTLET_1_ITEM->label, INDIGO_NAME_SIZE, "%s", AUX_OUTLET_NAME_1_ITEM->text.value);
 		snprintf(AUX_GPIO_OUTLET_DUTY_OUTLET_2_ITEM->label, INDIGO_NAME_SIZE, "%s", AUX_OUTLET_NAME_2_ITEM->text.value);
+		snprintf(AUX_GPIO_OUTLET_DUTY_OUTLET_3_ITEM->label, INDIGO_NAME_SIZE, "%s", AUX_OUTLET_NAME_3_ITEM->text.value);
+		snprintf(AUX_GPIO_OUTLET_DUTY_OUTLET_4_ITEM->label, INDIGO_NAME_SIZE, "%s", AUX_OUTLET_NAME_4_ITEM->text.value);
 
 		AUX_OUTLET_NAMES_PROPERTY->state = INDIGO_OK_STATE;
 		if (IS_CONNECTED) {
+			indigo_define_property(device, AUX_OUTLET_TYPES_PROPERTY, NULL);
 			indigo_define_property(device, AUX_GPIO_OUTLET_PROPERTY, NULL);
 			indigo_define_property(device, AUX_OUTLET_PULSE_LENGTHS_PROPERTY, NULL);
 			indigo_define_property(device, AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY, NULL);
@@ -824,69 +726,86 @@ static indigo_result aux_change_property(indigo_device *device, indigo_client *c
 		}
 		indigo_update_property(device, AUX_OUTLET_NAMES_PROPERTY, NULL);
 		return INDIGO_OK;
-	} else if (indigo_property_match_changeable(AUX_GPIO_OUTLET_PROPERTY, property)) {
-		// -------------------------------------------------------------------------------- AUX_GPIO_OUTLET
-		indigo_property_copy_values(AUX_GPIO_OUTLET_PROPERTY, property, false);
-		if (set_gpio_outlets(device) == true) {
-			AUX_GPIO_OUTLET_PROPERTY->state = INDIGO_OK_STATE;
-			indigo_update_property(device, AUX_GPIO_OUTLET_PROPERTY, NULL);
-		} else {
-			AUX_GPIO_OUTLET_PROPERTY->state = INDIGO_ALERT_STATE;
-			indigo_update_property(device, AUX_GPIO_OUTLET_PROPERTY, "Output operation failed, did you authorize?");
+	}
+	else if (indigo_property_match_changeable(AUX_OUTLET_TYPES_PROPERTY, property))
+	{
+		// -------------------------------------------------------------------------------- AUX_OUTLET_TYPES
+		indigo_property_copy_values(AUX_OUTLET_TYPES_PROPERTY, property, false);
+		if (set_gpio_types(device) == true)
+		{
+			AUX_OUTLET_TYPES_PROPERTY->state = INDIGO_OK_STATE;
+			indigo_update_property(device, AUX_OUTLET_TYPES_PROPERTY, NULL);
+			indigo_update_property(device, AUX_GPIO_OUTLET_PROPERTY, NULL); /* disabling PWM turns relay off*/
+		}
+		else
+		{
+			AUX_OUTLET_TYPES_PROPERTY->state = INDIGO_ALERT_STATE;
+			indigo_update_property(device, AUX_OUTLET_TYPES_PROPERTY, "Output operation failed");
 		}
 		return INDIGO_OK;
-	} else if (indigo_property_match_changeable(AUX_OUTLET_PULSE_LENGTHS_PROPERTY, property)) {
+	}
+	else if (indigo_property_match_changeable(AUX_GPIO_OUTLET_PROPERTY, property))
+	{
+		// -------------------------------------------------------------------------------- AUX_GPIO_OUTLET
+		indigo_property_copy_values(AUX_GPIO_OUTLET_PROPERTY, property, false);
+		if (set_gpio_outlets(device) == true)
+		{
+			AUX_GPIO_OUTLET_PROPERTY->state = INDIGO_OK_STATE;
+			indigo_update_property(device, AUX_GPIO_OUTLET_PROPERTY, NULL);
+		}
+		else
+		{
+			AUX_GPIO_OUTLET_PROPERTY->state = INDIGO_ALERT_STATE;
+			indigo_update_property(device, AUX_GPIO_OUTLET_PROPERTY, "Output operation failed.");
+		}
+		return INDIGO_OK;
+	}
+	else if (indigo_property_match_changeable(AUX_OUTLET_PULSE_LENGTHS_PROPERTY, property))
+	{
 		// -------------------------------------------------------------------------------- AUX_OUTLET_PULSE_LENGTHS
 		indigo_property_copy_values(AUX_OUTLET_PULSE_LENGTHS_PROPERTY, property, false);
 		indigo_update_property(device, AUX_OUTLET_PULSE_LENGTHS_PROPERTY, NULL);
 		return INDIGO_OK;
-
-	} else if (indigo_property_match_changeable(AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY, property)) {
+	}
+	else if (indigo_property_match_changeable(AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY, property))
+	{
 		// -------------------------------------------------------------------------------- AUX_GPIO_OUTLET_FREQUENCIES
 		indigo_property_copy_values(AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY, property, false);
-		int period = 0, duty_cycle = 0;
-		asiair_pwm_get(0, &period, &duty_cycle);
-		double freq = 1 / (period / 1e9);
-		if (AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_1_ITEM->number.target != freq) {
-			period = (int)(1 / AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_1_ITEM->number.target * 1e9);
-			duty_cycle = (int)(period * AUX_GPIO_OUTLET_DUTY_OUTLET_1_ITEM->number.target / 100.0);
-			asiair_pwm_set(0, period, duty_cycle);
+		if (set_pwm_properties(device) == true)
+		{
+			AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->state = INDIGO_OK_STATE;
+			indigo_update_property(device, AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY, NULL);
 		}
-
-		asiair_pwm_get(1, &period, &duty_cycle);
-		freq = 1 / (period / 1e9);
-		if (AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_2_ITEM->number.target != freq) {
-			period = (int)(1 / AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_2_ITEM->number.target * 1e9);
-			duty_cycle = (int)(period * AUX_GPIO_OUTLET_DUTY_OUTLET_2_ITEM->number.target / 100.0);
-			asiair_pwm_set(1, period, duty_cycle);
+		else
+		{
+			AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->state = INDIGO_ALERT_STATE;
+			indigo_update_property(device, AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY, "Output operation failed");
 		}
-
-		indigo_update_property(device, AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY, NULL);
 		return INDIGO_OK;
-	} else if (indigo_property_match_changeable(AUX_GPIO_OUTLET_DUTY_PROPERTY, property)) {
+	}
+	else if (indigo_property_match_changeable(AUX_GPIO_OUTLET_DUTY_PROPERTY, property))
+	{
 		// -------------------------------------------------------------------------------- AUX_GPIO_OUTLET_DUTY_PROPERTY
 		indigo_property_copy_values(AUX_GPIO_OUTLET_DUTY_PROPERTY, property, false);
-		int period = 0, duty_cycle = 0;
-		asiair_pwm_get(0, &period, &duty_cycle);
-		double duty = (double)(duty_cycle) / period * 100;
-		if (AUX_GPIO_OUTLET_DUTY_OUTLET_1_ITEM->number.target != duty) {
-			duty_cycle = (int)(period * AUX_GPIO_OUTLET_DUTY_OUTLET_1_ITEM->number.target / 100.0);
-			asiair_pwm_set(0, period, duty_cycle);
+		if (set_pwm_properties(device) == true)
+		{
+			AUX_GPIO_OUTLET_DUTY_PROPERTY->state = INDIGO_OK_STATE;
+			indigo_update_property(device, AUX_GPIO_OUTLET_DUTY_PROPERTY, NULL);
 		}
-
-		asiair_pwm_get(1, &period, &duty_cycle);
-		duty = (double)(duty_cycle) / period * 100;
-		if (AUX_GPIO_OUTLET_DUTY_OUTLET_2_ITEM->number.target != duty) {
-			duty_cycle = (int)(period * AUX_GPIO_OUTLET_DUTY_OUTLET_2_ITEM->number.target / 100.0);
-			asiair_pwm_set(1, period, duty_cycle);
+		else
+		{
+			AUX_GPIO_OUTLET_DUTY_PROPERTY->state = INDIGO_ALERT_STATE;
+			indigo_update_property(device, AUX_GPIO_OUTLET_DUTY_PROPERTY, "Output operation failed");
 		}
-
-		indigo_update_property(device, AUX_GPIO_OUTLET_DUTY_PROPERTY, NULL);
 		return INDIGO_OK;
-	} else if (indigo_property_match_changeable(CONFIG_PROPERTY, property)) {
+	}
+	else if (indigo_property_match_changeable(CONFIG_PROPERTY, property))
+	{
 		// -------------------------------------------------------------------------------- CONFIG
 		if (indigo_switch_match(CONFIG_SAVE_ITEM, property)) {
 			indigo_save_property(device, NULL, AUX_OUTLET_NAMES_PROPERTY);
+			indigo_save_property(device, NULL, AUX_OUTLET_TYPES_PROPERTY);
+			indigo_save_property(device, NULL, AUX_GPIO_OUTLET_PROPERTY);
 			indigo_save_property(device, NULL, AUX_OUTLET_PULSE_LENGTHS_PROPERTY);
 			indigo_save_property(device, NULL, AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY);
 			indigo_save_property(device, NULL, AUX_GPIO_OUTLET_DUTY_PROPERTY);
@@ -903,6 +822,7 @@ static indigo_result aux_detach(indigo_device *device) {
 		indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		handle_aux_connect_property(device);
 	}
+	indigo_release_property(AUX_OUTLET_TYPES_PROPERTY);
 	indigo_release_property(AUX_GPIO_OUTLET_PROPERTY);
 	indigo_release_property(AUX_OUTLET_PULSE_LENGTHS_PROPERTY);
 	indigo_release_property(AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY);
