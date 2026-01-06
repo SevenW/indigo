@@ -29,7 +29,7 @@
 #include "indigo_aux_asiair.h"
 
 #define DRIVER_VERSION         0x0003
-#define AUX_ASIAIR_NAME     "ZWO Power Ports ASIAIR v2"
+#define AUX_ASIAIR_NAME     "ZWO Power Ports ASIAIR"
 
 #include <stdlib.h>
 #include <string.h>
@@ -43,7 +43,6 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <fcntl.h>
-
 
 #include <pigpiod_if2.h>
 
@@ -99,7 +98,7 @@
 #define AUX_GPIO_OUTLET_DUTY_OUTLET_3_ITEM     (AUX_GPIO_OUTLET_DUTY_PROPERTY->items + 2)
 #define AUX_GPIO_OUTLET_DUTY_OUTLET_4_ITEM     (AUX_GPIO_OUTLET_DUTY_PROPERTY->items + 3)
 
-	typedef struct {
+typedef struct {
 
 } logical_device_data;
 
@@ -108,16 +107,11 @@ typedef struct {
 	int count_open;
 	bool udp;
 	pthread_mutex_t port_mutex;
-	//bool pwm_present;
 	bool pwm_enabled[4];
-	int pwm_freq[4];
-	int pwm_duty[4];
-
 	bool relay_active[4];
 	indigo_timer *relay_timers[4];
 	pthread_mutex_t relay_mutex;
-	indigo_timer *pwm_settings_timer;
-
+	//indigo_timer *pwm_settings_timer;
 	indigo_property *outlet_names_property,
 					*outlet_types_property,
 	                *gpio_outlet_property,
@@ -138,6 +132,8 @@ static void delete_device();
 
 static int pi = -1; /* pigpio handle */
 static int output_pins[] = {12, 13, 26, 18};
+static int n_out = sizeof(output_pins)/sizeof(output_pins[0]);
+static int pwm_resolution = 1000;
 
 static bool asiair_connect_pigpiod() {
 	pi = pigpio_start(NULL, NULL);
@@ -185,7 +181,7 @@ static bool asiair_set_pin_mode(int pin, bool output)
 bool asiair_init_pins()
 {
 	// set pins to output mode
-	for (int i = 0; i < 4; i++)
+	for (int i = 0; i < n_out; i++)
 	{
 		if (!asiair_set_pin_mode(output_pins[i], true))
 			return false;
@@ -197,7 +193,7 @@ bool asiair_init_pins()
 bool asiair_deinit_pins()
 {
 	// set pins to input mode
-	for (int i = 0; i < 4; i++)
+	for (int i = 0; i < n_out; i++)
 	{
 		if (!asiair_set_pin_mode(output_pins[i], false))
 			return false;
@@ -206,53 +202,44 @@ bool asiair_deinit_pins()
 	return true;
 }
 
-static bool asiair_pwm_get(int pin, int *pwm_frequency, int *duty_cycle) {
+static bool asiair_pwm_read(int pin, int *pwm_frequency, int *duty_cycle) {
 	*pwm_frequency = get_PWM_frequency(pi, pin); // frequency in Hz
 	if (*pwm_frequency < 0) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to get PWM pwm_frequency for pin %d", pin);
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to get PWM pwm_frequency for pin %d, pigpio error %d", pin, *pwm_frequency);
 		return false;
 	}
 	*duty_cycle = get_PWM_dutycycle(pi, pin);
 	if (*duty_cycle == PI_NOT_PWM_GPIO) {
 		*duty_cycle = gpio_read(pi, pin);
 		if (*duty_cycle < 0) {
-			INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to get PWM duty cycle for pin %d, error %d", pin, *duty_cycle);
+			INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to get PWM duty cycle for pin %d, pigpio error %d", pin, *duty_cycle);
 			return false;
 		}
-		*duty_cycle = *duty_cycle * 100;
+		*duty_cycle = *duty_cycle * pwm_resolution;
 	}
 	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "asiair_pwm_get freq = %d, duty = %d, gpio = %d", *pwm_frequency, *duty_cycle, pin);
-	return true;
-}
-
-static bool asiair_pwm_read(int pin, int *value)
-{
-	if (value == NULL)
-		return false;
-
-	int frequency, duty_cycle;
-	if (!asiair_pwm_get(pin, &frequency, &duty_cycle)) return false;
-	*value = duty_cycle;
 	return true;
 }
 
 static bool asiair_pwm_write(int pin, int pwm_frequency, int duty_cycle)
 {
 	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "PWM set frequency = %d, duty_cycle = %d gpio = %d", pwm_frequency, duty_cycle, pin);
-	if (set_PWM_range(pi, pin, 100) < 0)
-	{
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to set PWM range for pin %d", pin);
-		return false;
-	}
-	if (set_PWM_frequency(pi, pin, pwm_frequency) < 0)
-	{
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to set PWM frequency for pin %d", pin);
-		return false;
-	}
-	int status = set_PWM_dutycycle(pi, pin, duty_cycle);
+	int status = set_PWM_range(pi, pin, pwm_resolution);
 	if (status < 0)
 	{
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to set PWM duty cycle for pin %d, error %d", pin, status);
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to set PWM range for pin %d, pigpio error %d", pin, status);
+		return false;
+	}
+	status = set_PWM_frequency(pi, pin, pwm_frequency);
+	if (status < 0)
+	{
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to set PWM frequency for pin %d, pigpio error %d", pin, status);
+		return false;
+	}
+	status = set_PWM_dutycycle(pi, pin, duty_cycle);
+	if (status < 0)
+	{
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to set PWM duty cycle for pin %d, pigpio error %d", pin, status);
 		return false;
 	}
 	return true;
@@ -264,34 +251,32 @@ static bool asiair_pin_read(int pin, int *value)
 		return false;
 
 	*value = gpio_read(pi, pin);
-	if (*value < 0)
-		/* PI_BAD_GPIO */
-		{
-			INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to read value from pin %d!", pin);
-			return false;
-		}
+	if (*value < 0) /* PI_BAD_GPIO */
+	{
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to read value from pin %d, pigpio error %d", pin, *value);
+		return false;
+	}
 	return true;
 }
 
 static bool asiair_pin_write(int pin, int value) {
 	if (gpio_write(pi, pin, value) < 0)
 	{
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to write value to pin %d!", pin);
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to write value to pin %d, pigpio error %d", pin, value);
 		return false;
 	}
 	return true;
 }
 
-static bool asiair_set_output_line(indigo_device *device, uint16_t line, int value)
+static bool asiair_write_output_line(indigo_device *device, uint16_t line, int value)
 {
-	if (line >= 4) return false;
+	if (line >= n_out) return false;
 	if (PRIVATE_DATA->pwm_enabled[line])
 	{
 		int duty = 0;
 		if (value>0)
-			duty = (AUX_GPIO_OUTLET_DUTY_PROPERTY->items + line)->number.value;
+			duty = (int)((AUX_GPIO_OUTLET_DUTY_PROPERTY->items + line)->number.value * pwm_resolution / 100.0);
 		return asiair_pwm_write(output_pins[line], (AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->items + line)->number.value, duty);
-		//return asiair_pwm_write(output_pins[line], PRIVATE_DATA->pwm_freq[line], value);
 	}
 	else
 	{
@@ -301,9 +286,11 @@ static bool asiair_set_output_line(indigo_device *device, uint16_t line, int val
 
 static bool asiair_read_output_lines(indigo_device * device, int *relay)
 {
+	int unused = 0;
 	for (int i = 0; i < 4; i++) {
 		if (PRIVATE_DATA->pwm_enabled[i]) {
-			if (!asiair_pwm_read(output_pins[i], &relay[i])) return false;
+			if (!asiair_pwm_read(output_pins[i], &unused, &relay[i]))
+				return false;
 			if (relay[i] > 0) relay[i] = 1; /*when PWM is enabled set relay to "on"*/
 		} else {
 			if (!asiair_pin_read(output_pins[i], &relay[i])) return false;
@@ -357,10 +344,10 @@ static int asiair_init_properties(indigo_device *device) {
 	AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY = indigo_init_number_property(NULL, device->name, AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY_NAME, AUX_RELAYS_GROUP, "PWM Frequencies (Hz)", INDIGO_OK_STATE, INDIGO_RW_PERM, 4);
 	if (AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY == NULL)
 		return INDIGO_FAILED;
-	indigo_init_number_item(AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_1_ITEM, AUX_GPIO_OUTLETS_OUTLET_1_ITEM_NAME, "Output #1", 0.5, 1000000, 100, 100);
-	indigo_init_number_item(AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_2_ITEM, AUX_GPIO_OUTLETS_OUTLET_2_ITEM_NAME, "Output #2", 0.5, 1000000, 100, 100);
-	indigo_init_number_item(AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_3_ITEM, AUX_GPIO_OUTLETS_OUTLET_3_ITEM_NAME, "Output #3", 0.5, 1000000, 100, 100);
-	indigo_init_number_item(AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_4_ITEM, AUX_GPIO_OUTLETS_OUTLET_4_ITEM_NAME, "Output #4", 0.5, 1000000, 100, 100);
+	indigo_init_number_item(AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_1_ITEM, AUX_GPIO_OUTLETS_OUTLET_1_ITEM_NAME, "Output #1", 10, 8000, 100, 500);
+	indigo_init_number_item(AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_2_ITEM, AUX_GPIO_OUTLETS_OUTLET_2_ITEM_NAME, "Output #2", 10, 8000, 100, 500);
+	indigo_init_number_item(AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_3_ITEM, AUX_GPIO_OUTLETS_OUTLET_3_ITEM_NAME, "Output #3", 10, 8000, 100, 500);
+	indigo_init_number_item(AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_4_ITEM, AUX_GPIO_OUTLETS_OUTLET_4_ITEM_NAME, "Output #4", 10, 8000, 100, 500);
 	// -------------------------------------------------------------------------------- AUX_GPIO_OUTLET_DUTY_CYCLES
 	//AUX_GPIO_OUTLET_DUTY_PROPERTY = indigo_init_number_property(NULL, device->name, AUX_GPIO_OUTLET_DUTY_PROPERTY_NAME, AUX_RELAYS_GROUP, "PWM Duty cycles (%)", INDIGO_OK_STATE, INDIGO_RW_PERM, 4);
 	AUX_GPIO_OUTLET_DUTY_PROPERTY = indigo_init_number_property(NULL, device->name, AUX_HEATER_OUTLET_PROPERTY_NAME, AUX_RELAYS_GROUP, "PWM Duty cycles (%)", INDIGO_OK_STATE, INDIGO_RW_PERM, 4);
@@ -376,8 +363,6 @@ static int asiair_init_properties(indigo_device *device) {
 
 static bool update_pwm_properties(indigo_device *device)
 {
-	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "update_pwm_properties called");
-
 	int relay_value[4];
 	if (!asiair_read_output_lines(device, relay_value))
 	{
@@ -390,7 +375,7 @@ static bool update_pwm_properties(indigo_device *device)
 	{
 		if ((relay_value[i] > 0) && PRIVATE_DATA->pwm_enabled[i])
 		{
-			if (!asiair_pwm_get(output_pins[i], &pwm_frequency, &duty_cycle))
+			if (!asiair_pwm_read(output_pins[i], &pwm_frequency, &duty_cycle))
 			{
 				AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->state = INDIGO_ALERT_STATE;
 				AUX_GPIO_OUTLET_DUTY_PROPERTY->state = INDIGO_ALERT_STATE;
@@ -399,7 +384,7 @@ static bool update_pwm_properties(indigo_device *device)
 			else
 			{
 				(AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->items + i)->number.value = (AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->items + i)->number.target = pwm_frequency;
-				(AUX_GPIO_OUTLET_DUTY_PROPERTY->items + i)->number.value = (AUX_GPIO_OUTLET_DUTY_PROPERTY->items + i)->number.target = duty_cycle;
+				(AUX_GPIO_OUTLET_DUTY_PROPERTY->items + i)->number.value = (AUX_GPIO_OUTLET_DUTY_PROPERTY->items + i)->number.target = ((double)duty_cycle * 100.0) / (double)pwm_resolution;
 			}
 		}
 	}
@@ -416,10 +401,9 @@ static bool update_pwm_properties(indigo_device *device)
 // }
 
 static void relay_1_timer_callback(indigo_device *device) {
-	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "relay timer callback called");
 	pthread_mutex_lock(&PRIVATE_DATA->relay_mutex);
 	PRIVATE_DATA->relay_active[0] = false;
-	asiair_set_output_line(device, 0, 0);
+	asiair_write_output_line(device, 0, 0);
 	AUX_GPIO_OUTLET_1_ITEM->sw.value = false;
 	indigo_update_property(device, AUX_GPIO_OUTLET_PROPERTY, NULL);
 	pthread_mutex_unlock(&PRIVATE_DATA->relay_mutex);
@@ -428,7 +412,7 @@ static void relay_1_timer_callback(indigo_device *device) {
 static void relay_2_timer_callback(indigo_device *device) {
 	pthread_mutex_lock(&PRIVATE_DATA->relay_mutex);
 	PRIVATE_DATA->relay_active[1] = false;
-	asiair_set_output_line(device, 1, 0);
+	asiair_write_output_line(device, 1, 0);
 	AUX_GPIO_OUTLET_2_ITEM->sw.value = false;
 	indigo_update_property(device, AUX_GPIO_OUTLET_PROPERTY, NULL);
 	pthread_mutex_unlock(&PRIVATE_DATA->relay_mutex);
@@ -437,7 +421,7 @@ static void relay_2_timer_callback(indigo_device *device) {
 static void relay_3_timer_callback(indigo_device *device) {
 	pthread_mutex_lock(&PRIVATE_DATA->relay_mutex);
 	PRIVATE_DATA->relay_active[2] = false;
-	asiair_set_output_line(device, 2, 0);
+	asiair_write_output_line(device, 2, 0);
 	AUX_GPIO_OUTLET_3_ITEM->sw.value = false;
 	indigo_update_property(device, AUX_GPIO_OUTLET_PROPERTY, NULL);
 	pthread_mutex_unlock(&PRIVATE_DATA->relay_mutex);
@@ -446,7 +430,7 @@ static void relay_3_timer_callback(indigo_device *device) {
 static void relay_4_timer_callback(indigo_device *device) {
 	pthread_mutex_lock(&PRIVATE_DATA->relay_mutex);
 	PRIVATE_DATA->relay_active[3] = false;
-	asiair_set_output_line(device, 3, 0);
+	asiair_write_output_line(device, 3, 0);
 	AUX_GPIO_OUTLET_4_ITEM->sw.value = false;
 	indigo_update_property(device, AUX_GPIO_OUTLET_PROPERTY, NULL);
 	pthread_mutex_unlock(&PRIVATE_DATA->relay_mutex);
@@ -464,9 +448,6 @@ static void (*relay_timer_callbacks[])(indigo_device*) = {
 static bool set_pwm_properties(indigo_device *device)
 {
 	int relay_value[4];
-
-	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "set_pwm_properties called");
-
 	if (!asiair_read_output_lines(device, relay_value))
 	{
 		INDIGO_DRIVER_ERROR(DRIVER_NAME, "asiair_pin_read(%d) failed", PRIVATE_DATA->handle);
@@ -477,7 +458,8 @@ static bool set_pwm_properties(indigo_device *device)
 	{
 		if ((relay_value[i] > 0) && PRIVATE_DATA->pwm_enabled[i])
 		{
-			if (!asiair_pwm_write(output_pins[i], (AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->items + i)->number.value, (AUX_GPIO_OUTLET_DUTY_PROPERTY->items + i)->number.value)) return false;
+			int duty = (int)((AUX_GPIO_OUTLET_DUTY_PROPERTY->items + i)->number.value * pwm_resolution / 100.0);
+			if (!asiair_pwm_write(output_pins[i], (AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->items + i)->number.value, duty)) return false;
 		}
 	}
 	return update_pwm_properties(device);
@@ -487,8 +469,6 @@ static bool set_gpio_outlets(indigo_device *device)
 {
 	bool success = true;
 	int relay_value[4];
-	
-	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "set_gpio_outlets called");
 
 	if (!asiair_read_output_lines(device, relay_value))
 	{
@@ -502,10 +482,9 @@ static bool set_gpio_outlets(indigo_device *device)
 		{
 			if (((AUX_OUTLET_PULSE_LENGTHS_PROPERTY->items + i)->number.value > 0) && (AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value && !PRIVATE_DATA->relay_active[i])
 			{
-				INDIGO_DRIVER_DEBUG(DRIVER_NAME, "set_gpio_outlets called, in relay timer workflow");
-				if (!asiair_set_output_line(device, i, (int)(AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value))
+				if (!asiair_write_output_line(device, i, (int)(AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value))
 				{
-					INDIGO_DRIVER_ERROR(DRIVER_NAME, "asiair_pin_write(%d) failed, did you authorize?", PRIVATE_DATA->handle);
+					INDIGO_DRIVER_ERROR(DRIVER_NAME, "asiair_pin_write(%d) failed", PRIVATE_DATA->handle);
 					success = false;
 				}
 				else
@@ -516,10 +495,9 @@ static bool set_gpio_outlets(indigo_device *device)
 			}
 			else if ((AUX_OUTLET_PULSE_LENGTHS_PROPERTY->items + i)->number.value == 0 || (!(AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value && !PRIVATE_DATA->relay_active[i]))
 			{
-				INDIGO_DRIVER_DEBUG(DRIVER_NAME, "set_gpio_outlets called, standard workflow switch = %d", (int)(AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value);
-				if (!asiair_set_output_line(device, i, (int)(AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value))
+				if (!asiair_write_output_line(device, i, (int)(AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value))
 				{
-					INDIGO_DRIVER_ERROR(DRIVER_NAME, "asiair_pin_write(%d) failed, did you authorize?", PRIVATE_DATA->handle);
+					INDIGO_DRIVER_ERROR(DRIVER_NAME, "asiair_pin_write(%d) failed", PRIVATE_DATA->handle);
 					success = false;
 				}
 			}
@@ -531,8 +509,6 @@ static bool set_gpio_outlets(indigo_device *device)
 static bool set_gpio_types(indigo_device *device)
 {
 	int relay_value[4];
-
-	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "set_gpio_types called");
 
 	if (!asiair_read_output_lines(device, relay_value))
 	{
@@ -560,7 +536,8 @@ static bool set_gpio_types(indigo_device *device)
 				//was digital, now set to PWM when relay is on
 				if (relay_value[i] > 0)
 				{
-					if (!asiair_pwm_write(output_pins[i], (AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->items + i)->number.value, (AUX_GPIO_OUTLET_DUTY_PROPERTY->items + i)->number.value))
+					int duty = (int)((AUX_GPIO_OUTLET_DUTY_PROPERTY->items + i)->number.value * pwm_resolution / 100.0);
+					if (!asiair_pwm_write(output_pins[i], (AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->items + i)->number.value, duty))
 						return false;
 				}
 			}
@@ -600,7 +577,6 @@ static indigo_result aux_attach(indigo_device *device) {
 static void handle_aux_connect_property(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		if (asiair_connect_pigpiod()) {
-			INDIGO_DRIVER_DEBUG(DRIVER_NAME, "connected after pigpiod connection");
 			AUX_GPIO_OUTLET_DUTY_PROPERTY->hidden = false;
 			AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->hidden = false;
 			if (asiair_init_pins()) {
@@ -611,7 +587,7 @@ static void handle_aux_connect_property(indigo_device *device) {
 				indigo_update_property(device, INFO_PROPERTY, NULL);
 
 				// Initialize to current state of outlets
-				// TODO: PWM settings of active lines (Inactive lines loose PWM info.
+				// TODO: PWM settings of active lines (Inactive lines have no PWM info in hardware).
 				int relay_value[4];
 				if (!asiair_read_output_lines(device, relay_value)) {
 					INDIGO_DRIVER_ERROR(DRIVER_NAME, "asiair_pin_read(%d) failed", PRIVATE_DATA->handle);
@@ -622,11 +598,6 @@ static void handle_aux_connect_property(indigo_device *device) {
 						(AUX_OUTLET_TYPES_PROPERTY->items + i)->sw.value = 0;
 						(AUX_GPIO_OUTLET_PROPERTY->items + i)->sw.value = relay_value[i];
 						PRIVATE_DATA->relay_active[i] = false;
-
-						//PRIVATE_DATA->pwm_freq[i] = (int)(AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->items + i)->number.target;
-						//PRIVATE_DATA->pwm_duty[i] = (int)(AUX_GPIO_OUTLET_DUTY_PROPERTY->items + i)->number.target;
-						//INDIGO_DRIVER_DEBUG(DRIVER_NAME, "connected before write, TODO check if needed");
-						//asiair_pwm_write(output_pins[i], PRIVATE_DATA->pwm_freq[i], PRIVATE_DATA->pwm_duty[i]);
 					}
 				}
 
@@ -648,6 +619,7 @@ static void handle_aux_connect_property(indigo_device *device) {
 		{
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, false);
+			indigo_update_property(device, CONNECTION_PROPERTY, "Process pigpiod not running! Use 'sudo pigpiod' to start it.");
 			INDIGO_DRIVER_ERROR(DRIVER_NAME, "Process pigpiod not running! Use 'sudo pigpiod' to start it.");
 		}	
 	} else {
@@ -879,7 +851,6 @@ static void delete_device() {
 		INDIGO_DRIVER_DEBUG(DRIVER_NAME, "REMOVE: PRIVATE_DATA");
 	}
 }
-
 
 indigo_result indigo_aux_asiair(indigo_driver_action action, indigo_driver_info *info) {
 
