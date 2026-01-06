@@ -23,6 +23,7 @@
  \file alpaca_switch.c
  */
 
+#include <ctype.h>
 #include <indigo/indigo_aux_driver.h>
 
 #include "alpaca_common.h"
@@ -621,11 +622,27 @@ long indigo_alpaca_switch_get_command(indigo_alpaca_device *alpaca_device, int v
 	return snprintf(buffer, buffer_length, "\"ErrorNumber\": %d, \"ErrorMessage\": \"%s\"", indigo_alpaca_error_NotImplemented, indigo_alpaca_error_string(indigo_alpaca_error_NotImplemented));
 }
 
-long indigo_alpaca_switch_set_command(indigo_alpaca_device *alpaca_device, int version, char *command, char *buffer, long buffer_length, char *param_1, char *param_2) {
-	if (!strcmp(command, "setswitch")) {
+void indigo_alpaca_key_casing(char *param_lc, char *param) {
+	strncpy(param_lc, param, 128);
+	char *sep = strchr(param_lc, '=');
+	if (sep != NULL) {
+		for (char *p = param_lc; (p < sep) && (*p != 0); p++) {
+			*p = tolower(*p);
+		}
+	}
+	param_lc[0] = toupper(param_lc[0]);
+}
+
+long indigo_alpaca_switch_set_command(indigo_alpaca_device *alpaca_device, int version, char *command, char *buffer, long buffer_length, char *param_1_in, char *param_2_in) {
+	char param_1[128] = {0};
+	char param_2[128] = {0};
+	indigo_alpaca_key_casing(param_1, param_1_in);
+	indigo_alpaca_key_casing(param_2, param_2_in);
+	if (!strcmp(command, "setswitch"))
+	{
 		int id = 0;
 		indigo_alpaca_error result;
-		if (sscanf(param_1, "ID=%d", &id) == 1) {
+		if (sscanf(param_1, "Id=%d", &id) == 1) {
 			bool value = !strcasecmp(param_2, "State=true");
 			result = alpaca_set_setswitch(alpaca_device, version, id, value);
 		} else {
@@ -636,11 +653,14 @@ long indigo_alpaca_switch_set_command(indigo_alpaca_device *alpaca_device, int v
 	if (!strcmp(command, "setswitchvalue")) {
 		int id = 0;
 		indigo_alpaca_error result;
-		if (sscanf(param_1, "ID=%d", &id) == 1) {
+		if (sscanf(param_1, "Id=%d", &id) == 1)
+		{
 			double value = 0;
 			sscanf(param_2, "Value=%lf", &value);
 			result = alpaca_set_setswitchvalue(alpaca_device, version, id, value);
-		} else {
+		}
+		else
+		{
 			result = indigo_alpaca_error_InvalidValue;
 		}
 		return indigo_alpaca_append_error(buffer, buffer_length, result);
@@ -648,7 +668,7 @@ long indigo_alpaca_switch_set_command(indigo_alpaca_device *alpaca_device, int v
 	if (!strcmp(command, "setswitchname")) {
 		int id = 0;
 		indigo_alpaca_error result;
-		if (sscanf(param_1, "ID=%d", &id) == 1) {
+		if (sscanf(param_1, "Id=%d", &id) == 1) {
 			char value[INDIGO_VALUE_SIZE];
 			sscanf(param_2, "Name=%s", value);
 			result = alpaca_set_setswitchname(alpaca_device, version, id, value);
