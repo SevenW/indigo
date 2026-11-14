@@ -420,7 +420,7 @@ driver asiair {
 				value = 100;
 			}
 			item AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_2 {
-				name = AUX_GPIO_OUTLETS_OUTLET_4_ITEM_NAME;
+				name = AUX_GPIO_OUTLETS_OUTLET_2_ITEM_NAME;
 				label = "Output #2";
 				min = 0.5;
 				max = 1000000;
@@ -450,7 +450,7 @@ driver asiair {
 				value = 100;
 			}
 			item AUX_GPIO_OUTLET_DUTY_OUTLET_2 {
-				name = AUX_GPIO_OUTLETS_OUTLET_4_ITEM_NAME;
+				name = AUX_GPIO_OUTLETS_OUTLET_2_ITEM_NAME;
 				label = "Output #2";
 				min = 0;
 				max = 100;
