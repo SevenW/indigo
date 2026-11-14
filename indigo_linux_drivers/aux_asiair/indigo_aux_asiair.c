@@ -116,7 +116,7 @@ typedef struct {
 #include "../aux_rpio/shared/rpio_sysfs.c"
 
 static const int asiair_output_pins[OUTPUT_COUNT] = { 12, 13, 26, 18 };
-// PWM channel 0 drives Output #1 and channel 1 drives Output #1.
+// PWM channel 0 drives Output #1 and channel 1 drives Output #2.
 static const int asiair_pwm_lines[PWM_COUNT] = { 0, 1 };
 
 static void asiair_apply_outlet_names(indigo_device *device) {
