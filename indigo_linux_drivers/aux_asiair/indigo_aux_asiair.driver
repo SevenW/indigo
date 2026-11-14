@@ -238,9 +238,9 @@ driver asiair {
 			// The existence of a PWM chip says nothing about whether any header pin
 			// is routed to it, so PWM is used only when it is asked for.
 			if (X_AUX_PWM_ENABLED_ITEM->sw.value && !PRIVATE_DATA->sysfs.pwm_present) {
-				indigo_send_message(device, ALERT_PROPERTY, "PWM is enabled but no PWM chip was found, Outputs #1 and #4 stay plain GPIO");
+				indigo_send_message(device, ALERT_PROPERTY, "PWM is enabled but no PWM chip was found, Outputs #1 and #2 stay plain GPIO");
 			} else if (PRIVATE_DATA->sysfs.pwm_present) {
-				indigo_send_message(device, IDLE_PROPERTY, "PWM drives Outputs #1 and #4");
+				indigo_send_message(device, IDLE_PROPERTY, "PWM drives Outputs #1 and #2");
 			}
 			AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->hidden = AUX_GPIO_OUTLET_DUTY_PROPERTY->hidden = !PRIVATE_DATA->sysfs.pwm_present;
 			connection_result = rpio_sysfs_export_all(&PRIVATE_DATA->sysfs);
@@ -378,7 +378,7 @@ driver asiair {
 		switch X_AUX_PWM {
 			name = "X_AUX_PWM";
 			group = AUX_RELAYS_GROUP;
-			label = "PWM on Outputs #1 and #4";
+			label = "PWM on Outputs #1 and #2";
 			rule = INDIGO_ONE_OF_MANY_RULE;
 			always_defined = true;
 			persistent = true;
@@ -421,7 +421,7 @@ driver asiair {
 			}
 			item AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_2 {
 				name = AUX_GPIO_OUTLETS_OUTLET_4_ITEM_NAME;
-				label = "Output #4";
+				label = "Output #2";
 				min = 0.5;
 				max = 1000000;
 				step = 100;
@@ -451,7 +451,7 @@ driver asiair {
 			}
 			item AUX_GPIO_OUTLET_DUTY_OUTLET_2 {
 				name = AUX_GPIO_OUTLETS_OUTLET_4_ITEM_NAME;
-				label = "Output #4";
+				label = "Output #2";
 				min = 0;
 				max = 100;
 				step = 1;

@@ -116,7 +116,7 @@ typedef struct {
 #include "../aux_rpio/shared/rpio_sysfs.c"
 
 static const int asiair_output_pins[OUTPUT_COUNT] = { 12, 13, 26, 18 };
-// PWM channel 0 drives Output #1 and channel 1 drives Output #4.
+// PWM channel 0 drives Output #1 and channel 1 drives Output #1.
 static const int asiair_pwm_lines[PWM_COUNT] = { 0, 1 };
 
 static void asiair_apply_outlet_names(indigo_device *device) {
@@ -311,9 +311,9 @@ static void aux_connection_handler(indigo_device *device) {
 		// The existence of a PWM chip says nothing about whether any header pin
 		// is routed to it, so PWM is used only when it is asked for.
 		if (X_AUX_PWM_ENABLED_ITEM->sw.value && !PRIVATE_DATA->sysfs.pwm_present) {
-			indigo_send_message(device, ALERT_PROPERTY, "PWM is enabled but no PWM chip was found, Outputs #1 and #4 stay plain GPIO");
+			indigo_send_message(device, ALERT_PROPERTY, "PWM is enabled but no PWM chip was found, Outputs #1 and #2 stay plain GPIO");
 		} else if (PRIVATE_DATA->sysfs.pwm_present) {
-			indigo_send_message(device, IDLE_PROPERTY, "PWM drives Outputs #1 and #4");
+			indigo_send_message(device, IDLE_PROPERTY, "PWM drives Outputs #1 and #2");
 		}
 		AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->hidden = AUX_GPIO_OUTLET_DUTY_PROPERTY->hidden = !PRIVATE_DATA->sysfs.pwm_present;
 		connection_result = rpio_sysfs_export_all(&PRIVATE_DATA->sysfs);
@@ -478,7 +478,7 @@ static indigo_result aux_attach(indigo_device *device) {
 		indigo_init_number_item(AUX_OUTLET_PULSE_LENGTHS_2_ITEM, AUX_GPIO_OUTLETS_OUTLET_2_ITEM_NAME, "Output #2", 0, 100000, 100, 0);
 		indigo_init_number_item(AUX_OUTLET_PULSE_LENGTHS_3_ITEM, AUX_GPIO_OUTLETS_OUTLET_3_ITEM_NAME, "Output #3", 0, 100000, 100, 0);
 		indigo_init_number_item(AUX_OUTLET_PULSE_LENGTHS_4_ITEM, AUX_GPIO_OUTLETS_OUTLET_4_ITEM_NAME, "Output #4", 0, 100000, 100, 0);
-		X_AUX_PWM_PROPERTY = indigo_init_switch_property(NULL, device->name, X_AUX_PWM_PROPERTY_NAME, AUX_RELAYS_GROUP, "PWM on Outputs #1 and #4", INDIGO_OK_STATE, INDIGO_RW_PERM, INDIGO_ONE_OF_MANY_RULE, 2);
+		X_AUX_PWM_PROPERTY = indigo_init_switch_property(NULL, device->name, X_AUX_PWM_PROPERTY_NAME, AUX_RELAYS_GROUP, "PWM on Outputs #1 and #2", INDIGO_OK_STATE, INDIGO_RW_PERM, INDIGO_ONE_OF_MANY_RULE, 2);
 		if (X_AUX_PWM_PROPERTY == NULL) {
 			return INDIGO_FAILED;
 		}
