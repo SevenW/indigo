@@ -31,6 +31,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 //- include
 
@@ -313,10 +314,16 @@ static void aux_connection_handler(indigo_device *device) {
 		if (X_AUX_PWM_ENABLED_ITEM->sw.value && !PRIVATE_DATA->sysfs.pwm_present) {
 			indigo_send_message(device, ALERT_PROPERTY, "PWM is enabled but no PWM chip was found, Outputs #1 and #2 stay plain GPIO");
 		} else if (PRIVATE_DATA->sysfs.pwm_present) {
-			indigo_send_message(device, IDLE_PROPERTY, "PWM drives Outputs #1 and #2");
+			indigo_send_message(device, IDLE_PROPERTY, "PWM drives Outputs #1, #2 and #4");
 		}
 		AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->hidden = AUX_GPIO_OUTLET_DUTY_PROPERTY->hidden = !PRIVATE_DATA->sysfs.pwm_present;
 		connection_result = rpio_sysfs_export_all(&PRIVATE_DATA->sysfs);
+
+		// Program GPIO 18 to be in PWM0_0 mode. to be sure program GPIO12 and 13 as well.
+		system("pinctrl set 18 a5");
+		system("pinctrl set 13 a0");
+		system("pinctrl set 12 a0");
+
 		if (connection_result) {
 			int values[OUTPUT_COUNT];
 			connection_result = rpio_sysfs_read_outputs(&PRIVATE_DATA->sysfs, values);
@@ -490,12 +497,12 @@ static indigo_result aux_attach(indigo_device *device) {
 		}
 		indigo_init_number_item(AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_1_ITEM, AUX_GPIO_OUTLETS_OUTLET_1_ITEM_NAME, "Output #1", 0.5, 1000000, 100, 100);
 		indigo_init_number_item(AUX_GPIO_OUTLET_FREQUENCIES_OUTLET_2_ITEM, AUX_GPIO_OUTLETS_OUTLET_2_ITEM_NAME, "Output #2", 0.5, 1000000, 100, 100);
-		AUX_GPIO_OUTLET_DUTY_PROPERTY = indigo_init_number_property(NULL, device->name, AUX_GPIO_OUTLET_DUTY_PROPERTY_NAME, AUX_RELAYS_GROUP, "PWM Duty cycles (%)", INDIGO_OK_STATE, INDIGO_RW_PERM, 2);
+		AUX_GPIO_OUTLET_DUTY_PROPERTY = indigo_init_number_property(NULL, device->name, AUX_HEATER_OUTLET_PROPERTY_NAME, AUX_RELAYS_GROUP, "PWM Duty cycles (%)", INDIGO_OK_STATE, INDIGO_RW_PERM, 2);
 		if (AUX_GPIO_OUTLET_DUTY_PROPERTY == NULL) {
 			return INDIGO_FAILED;
 		}
-		indigo_init_number_item(AUX_GPIO_OUTLET_DUTY_OUTLET_1_ITEM, AUX_GPIO_OUTLETS_OUTLET_1_ITEM_NAME, "Output #1", 0, 100, 1, 100);
-		indigo_init_number_item(AUX_GPIO_OUTLET_DUTY_OUTLET_2_ITEM, AUX_GPIO_OUTLETS_OUTLET_2_ITEM_NAME, "Output #2", 0, 100, 1, 100);
+		indigo_init_number_item(AUX_GPIO_OUTLET_DUTY_OUTLET_1_ITEM, AUX_GPIO_OUTLETS_OUTLET_1_ITEM_NAME, "Duty #1", 0, 100, 1, 100);
+		indigo_init_number_item(AUX_GPIO_OUTLET_DUTY_OUTLET_2_ITEM, AUX_GPIO_OUTLETS_OUTLET_2_ITEM_NAME, "Duty #2", 0, 100, 1, 100);
 		INDIGO_DEVICE_ATTACH_LOG(DRIVER_NAME, device->name);
 		return aux_enumerate_properties(device, NULL, NULL);
 	}

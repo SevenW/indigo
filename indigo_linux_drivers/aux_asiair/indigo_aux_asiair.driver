@@ -34,6 +34,7 @@ driver asiair {
 		#include <fcntl.h>
 		#include <sys/stat.h>
 		#include <unistd.h>
+		#include <stdlib.h>
 	}
 	define {
 		#include "../aux_rpio/shared/rpio_sysfs.h"
@@ -240,10 +241,16 @@ driver asiair {
 			if (X_AUX_PWM_ENABLED_ITEM->sw.value && !PRIVATE_DATA->sysfs.pwm_present) {
 				indigo_send_message(device, ALERT_PROPERTY, "PWM is enabled but no PWM chip was found, Outputs #1 and #2 stay plain GPIO");
 			} else if (PRIVATE_DATA->sysfs.pwm_present) {
-				indigo_send_message(device, IDLE_PROPERTY, "PWM drives Outputs #1 and #2");
+				indigo_send_message(device, IDLE_PROPERTY, "PWM drives Outputs #1, #2 and #4");
 			}
 			AUX_GPIO_OUTLET_FREQUENCIES_PROPERTY->hidden = AUX_GPIO_OUTLET_DUTY_PROPERTY->hidden = !PRIVATE_DATA->sysfs.pwm_present;
 			connection_result = rpio_sysfs_export_all(&PRIVATE_DATA->sysfs);
+
+			// Program GPIO 18 to be in PWM0_0 mode. to be sure program GPIO12 and 13 as well.
+			system("pinctrl set 18 a5");
+			system("pinctrl set 13 a0");
+			system("pinctrl set 12 a0");
+
 			if (connection_result) {
 				int values[OUTPUT_COUNT];
 				connection_result = rpio_sysfs_read_outputs(&PRIVATE_DATA->sysfs, values);
@@ -429,7 +436,7 @@ driver asiair {
 			}
 		}
 		number AUX_GPIO_OUTLET_DUTY {
-			name = AUX_GPIO_OUTLET_DUTY_PROPERTY_NAME;
+			name = AUX_HEATER_OUTLET_PROPERTY_NAME;
 			group = AUX_RELAYS_GROUP;
 			label = "PWM Duty cycles (%)";
 			persistent = true;
@@ -443,7 +450,7 @@ driver asiair {
 			}
 			item AUX_GPIO_OUTLET_DUTY_OUTLET_1 {
 				name = AUX_GPIO_OUTLETS_OUTLET_1_ITEM_NAME;
-				label = "Output #1";
+				label = "Duty #1";
 				min = 0;
 				max = 100;
 				step = 1;
@@ -451,7 +458,7 @@ driver asiair {
 			}
 			item AUX_GPIO_OUTLET_DUTY_OUTLET_2 {
 				name = AUX_GPIO_OUTLETS_OUTLET_2_ITEM_NAME;
-				label = "Output #2";
+				label = "Duty #2";
 				min = 0;
 				max = 100;
 				step = 1;
