@@ -398,6 +398,7 @@
 		function onDeleteProperty(property) {
 			if (property != null && workflowState.running && (property.device == workflowAgentForStep(workflowState.activeStep) || property.device == "Server")) {
 				workflowClearStartTimer();
+				workflowClearMonitorTimer();
 				workflowState.running = false;
 				workflowState.failedStep = workflowState.activeStep;
 				workflowState.activeStep = -1;
