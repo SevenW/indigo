@@ -2845,6 +2845,7 @@
 		5994827A3034FC75005D36BE /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		599482C730375395005D36BE /* astrometry.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; path = astrometry.html; sourceTree = "<group>"; };
 		599482C830375395005D36BE /* astrometry.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = astrometry.png; sourceTree = "<group>"; };
+		BD1842E4B1964EF6A8DBF001 /* workflow.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; path = workflow.html; sourceTree = "<group>"; };
 		59958DFB25CB0DEB00BEFA1B /* indigo_dome_skyroof.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = indigo_dome_skyroof.c; sourceTree = "<group>"; };
 		59958DFC25CB0DEB00BEFA1B /* README.md */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		59958DFD25CB0DEB00BEFA1B /* indigo_dome_skyroof_main.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = indigo_dome_skyroof_main.c; sourceTree = "<group>"; };
@@ -7152,6 +7153,7 @@
 				59AF321421F264D40008CC52 /* celestial.min.js */,
 				599482C730375395005D36BE /* astrometry.html */,
 				599482C830375395005D36BE /* astrometry.png */,
+				BD1842E4B1964EF6A8DBF001 /* workflow.html */,
 				59AF320321F262280008CC52 /* data */,
 			);
 			path = resource;

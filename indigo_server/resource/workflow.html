@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="utf-8"/>
+		<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no"/>
+		<link rel="stylesheet" href="bootstrap.min.css"/>
+		<link rel="stylesheet" href="glyphicons.css"/>
+		<link rel="stylesheet" href="indigo.css"/>
+	</head>
+	<title>INDIGO Imaging Workflow</title>
+	<body class="bg-secondary">
+		<div id="ROOT">
+			<indigo-navbar active="workflow" title="INDIGO Imaging Workflow" icon="imager.png" expand="md"></indigo-navbar>
+			<div class="container-fluid">
+				<div v-if="devices['Server'] == null" class="alert alert-warning m-1" role="alert">
+					Waiting for INDIGO Server...
+				</div>
+				<template v-else>
+					<div class="row justify-content-center">
+						<div class="col-xl-8 col-lg-10">
+							<div class="card p-1 m-1 bg-light">
+								<div class="card-body">
+									<h4>Guided imaging session</h4>
+									<p class="text-muted">Run the current setup in order: precise slew and centering, autofocus, guiding, then the configured capture batch. Device selections and capture settings come from the existing INDIGO pages.</p>
+									<div class="d-flex flex-wrap gap-2 mb-3">
+										<a class="btn btn-outline-secondary" href="mount.html">Mount settings</a>
+										<a class="btn btn-outline-secondary" href="astrometry.html">Target and centering</a>
+										<a class="btn btn-outline-secondary" href="imager.html">Camera and focus</a>
+										<a class="btn btn-outline-secondary" href="guider.html">Guiding setup</a>
+									</div>
+									<div class="alert" :class="window.workflowMessageClass()" role="status" aria-live="polite">
+										{{window.workflowState.message}}
+									</div>
+									<div class="list-group mb-3">
+										<div v-for="(step, index) in window.workflowSteps" :key="step.title" class="list-group-item d-flex align-items-center">
+											<span class="badge rounded-pill me-3" :class="window.workflowStepClass(index)">{{index + 1}}</span>
+											<div class="flex-grow-1">
+												<div class="fw-bold">{{step.title}}</div>
+												<small class="text-muted">{{step.description}}</small>
+											</div>
+											<span class="badge" :class="window.workflowStepClass(index)">{{window.workflowStepStatus(index)}}</span>
+										</div>
+									</div>
+									<div class="d-flex gap-2">
+										<button class="btn btn-primary" :disabled="!window.workflowCanStart()" @click="window.workflowStart()">Start workflow</button>
+										<button class="btn btn-outline-danger" :disabled="!window.workflowState.running" @click="window.workflowStop()">Stop</button>
+									</div>
+									<div class="mt-3 small text-muted">
+										<div>Mount: {{window.workflowSelectedValue('Mount Agent', 'FILTER_MOUNT_LIST')}}</div>
+										<div>Imaging camera: {{window.workflowSelectedValue('Imager Agent', 'FILTER_CCD_LIST')}}</div>
+										<div>Focuser: {{window.workflowSelectedValue('Imager Agent', 'FILTER_FOCUSER_LIST')}}</div>
+										<div>Guider camera: {{window.workflowSelectedValue('Guider Agent', 'FILTER_CCD_LIST')}}</div>
+										<div>Guide device: {{window.workflowSelectedValue('Guider Agent', 'FILTER_GUIDER_LIST')}}</div>
+									</div>
+								</div>
+							</div>
+						</div>
+					</div>
+				</template>
+				<indigo-status-bar></indigo-status-bar>
+			</div>
+		</div>
+	</body>
+	<script src="jquery.min.js"></script>
+	<script src="bootstrap.min.js"></script>
+	<script src="vue.global.prod.js"></script>
+	<script src="indigo.js"></script>
+	<script>
+		window.workflowSteps = [
+			{ title: "Slew and center", description: "Precise GOTO using the target and solver settings already configured." },
+			{ title: "Autofocus", description: "Run the Imager Agent autofocus with the selected camera and focuser." },
+			{ title: "Start guiding", description: "Start guiding with the selected guider camera and guide device." },
+			{ title: "Capture images", description: "Start the configured Imager Agent exposure batch." }
+		];
+
+		var workflowState = Vue.reactive({
+			completedCount: 0,
+			activeStep: -1,
+			running: false,
+			failedStep: -1,
+			cancelledStep: -1,
+			message: "Select the devices and set up your target, focus, guide, and capture settings on the existing pages.",
+			messageType: "info",
+			sawBusy: false
+		});
+		var workflowStartTimer = null;
+		var workflowMonitorTimer = null;
+		var workflowRequestedDrivers = {};
+		window.workflowState = workflowState;
+
+		function workflowSolverAgent() {
+			var platesolver = workflowFindProperty("Platesolver Agent", "AGENT_START_PROCESS");
+			if (platesolver != null && platesolver.item("PRECISE_GOTO") != null)
+				return "Platesolver Agent";
+			var astrometry = workflowFindProperty("Astrometry Agent", "AGENT_START_PROCESS");
+			if (astrometry != null && astrometry.item("PRECISE_GOTO") != null)
+				return "Astrometry Agent";
+			return INDIGO != null && INDIGO.devices["Platesolver Agent"] != null ? "Platesolver Agent" : "Astrometry Agent";
+		}
+
+		function workflowFindProperty(deviceName, propertyName) {
+			return INDIGO == null ? null : INDIGO.findProperty(deviceName, propertyName);
+		}
+
+		function workflowAgentForStep(index) {
+			if (index == 0)
+				return workflowSolverAgent();
+			if (index == 2)
+				return "Guider Agent";
+			return "Imager Agent";
+		}
+
+		function workflowActionForStep(index) {
+			return ["PRECISE_GOTO", "FOCUSING", "GUIDING", "EXPOSURE"][index];
+		}
+
+		function workflowProcessProperty(index) {
+			return workflowFindProperty(workflowAgentForStep(index), "AGENT_START_PROCESS");
+		}
+
+		function workflowHasSelection(agentName, propertyName) {
+			var property = workflowFindProperty(agentName, propertyName);
+			if (property == null || property.items.length == 0 || property.items[0].value)
+				return false;
+			for (var i = 0; i < property.items.length; i++) {
+				if (property.items[i].value)
+					return true;
+			}
+			return false;
+		}
+
+		function workflowSelectedValue(agentName, propertyName) {
+			var property = workflowFindProperty(agentName, propertyName);
+			if (property == null)
+				return "Not available";
+			for (var i = 0; i < property.items.length; i++) {
+				var item = property.items[i];
+				if (item.value)
+					return i == 0 ? "Not selected" : (item.label || item.name);
+			}
+			return "Not selected";
+		}
+
+		window.workflowSelectedValue = workflowSelectedValue;
+
+		function workflowStepReady(index) {
+			var property = workflowProcessProperty(index);
+			var itemName = workflowActionForStep(index);
+			if (property == null || property.item(itemName) == null || property.state == "Busy")
+				return false;
+			if (index == 0) {
+				var target = workflowFindProperty(workflowSolverAgent(), "AGENT_PLATESOLVER_GOTO_SETTINGS");
+				return workflowHasSelection("Mount Agent", "FILTER_MOUNT_LIST") && target != null && target.item("RA") != null && target.item("DEC") != null;
+			}
+			if (index == 1)
+				return workflowHasSelection("Imager Agent", "FILTER_CCD_LIST") && workflowHasSelection("Imager Agent", "FILTER_FOCUSER_LIST");
+			if (index == 2)
+				return workflowHasSelection("Guider Agent", "FILTER_CCD_LIST") && workflowHasSelection("Guider Agent", "FILTER_GUIDER_LIST");
+			return workflowHasSelection("Imager Agent", "FILTER_CCD_LIST");
+		}
+
+		function workflowCanStart() {
+			if (workflowState.running)
+				return false;
+			for (var i = 0; i < window.workflowSteps.length; i++) {
+				if (!workflowStepReady(i))
+					return false;
+			}
+			return true;
+		}
+
+		window.workflowCanStart = workflowCanStart;
+
+		function workflowSetMessage(message, type) {
+			workflowState.message = message;
+			workflowState.messageType = type;
+		}
+
+		window.workflowMessageClass = function() {
+			return "alert-" + workflowState.messageType;
+		};
+
+		window.workflowStepStatus = function(index) {
+			if (index < workflowState.completedCount)
+				return "Complete";
+			if (index == workflowState.failedStep)
+				return "Needs attention";
+			if (index == workflowState.cancelledStep)
+				return "Stopped";
+			if (workflowState.running && index == workflowState.activeStep)
+				return workflowState.sawBusy ? "In progress" : "Starting";
+			if (workflowState.running && index > workflowState.activeStep)
+				return "Waiting";
+			return workflowStepReady(index) ? "Ready" : "Configure";
+		};
+
+		window.workflowStepClass = function(index) {
+			if (index < workflowState.completedCount)
+				return "ok-state";
+			if (index == workflowState.failedStep)
+				return "alert-state";
+			if (index == workflowState.cancelledStep)
+				return "alert-state";
+			if (workflowState.running && index == workflowState.activeStep)
+				return workflowState.sawBusy ? "busy-state" : "idle-state";
+			return workflowStepReady(index) ? "idle-state" : "alert-state";
+		};
+
+		function workflowClearStartTimer() {
+			if (workflowStartTimer != null) {
+				clearTimeout(workflowStartTimer);
+				workflowStartTimer = null;
+			}
+		}
+
+		function workflowClearMonitorTimer() {
+			if (workflowMonitorTimer != null) {
+				clearInterval(workflowMonitorTimer);
+				workflowMonitorTimer = null;
+			}
+		}
+
+		function workflowFail(message) {
+			workflowClearStartTimer();
+			workflowClearMonitorTimer();
+			workflowState.failedStep = workflowState.activeStep;
+			workflowState.activeStep = -1;
+			workflowState.running = false;
+			workflowSetMessage(message, "danger");
+		}
+
+		function workflowStart() {
+			if (!workflowCanStart())
+				return;
+			if (!confirm("This will slew and center, autofocus, start guiding, and begin the configured capture batch. Continue?"))
+				return;
+			workflowState.completedCount = 0;
+			workflowState.activeStep = -1;
+			workflowState.failedStep = -1;
+			workflowState.cancelledStep = -1;
+			workflowState.running = true;
+			workflowMonitorTimer = setInterval(workflowCheckActiveAgent, 1000);
+			workflowStartCurrentStep();
+		}
+
+		window.workflowStart = workflowStart;
+
+		function workflowStartCurrentStep() {
+			if (!workflowState.running)
+				return;
+			var index = workflowState.completedCount;
+			if (index >= window.workflowSteps.length) {
+				workflowState.running = false;
+				workflowState.activeStep = -1;
+				workflowSetMessage("Workflow complete. The configured capture batch has finished.", "success");
+				return;
+			}
+			var deviceName = workflowAgentForStep(index);
+			var action = workflowActionForStep(index);
+			if (!workflowStepReady(index)) {
+				workflowState.activeStep = index;
+				workflowFail("Could not start " + window.workflowSteps[index].title + ": check the selected devices and settings on the existing pages.");
+				return;
+			}
+			if (!workflowPrepareStep(index)) {
+				workflowState.activeStep = index;
+				workflowFail("Could not prepare " + window.workflowSteps[index].title + ". Check the relevant agent settings.");
+				return;
+			}
+			workflowState.activeStep = index;
+			workflowState.sawBusy = false;
+			workflowSetMessage(window.workflowSteps[index].title + " is starting...", "info");
+			workflowStartTimer = setTimeout(function() {
+				if (workflowState.running && workflowState.activeStep == index && !workflowState.sawBusy)
+					workflowFail(window.workflowSteps[index].title + " did not start. Check the agent status and try again.");
+			}, 30000);
+			if (!changeProperty(deviceName, "AGENT_START_PROCESS", { [action]: true }))
+				workflowFail("Could not send " + window.workflowSteps[index].title + " to " + deviceName + ".");
+		}
+
+		function workflowPrepareStep(index) {
+			var deviceName = workflowAgentForStep(index);
+			var preview = workflowFindProperty(deviceName, "CCD_PREVIEW");
+			if (preview != null) {
+				var previewItemName = index == 0 ? "ENABLED" : "ENABLED_WITH_HISTOGRAM";
+				var previewItem = preview.item(previewItemName);
+				if (previewItem != null && !previewItem.value && !changeProperty(deviceName, "CCD_PREVIEW", { [previewItemName]: true }))
+					return false;
+			}
+			if (index == 3) {
+				if (!changeProperty("Imager Agent", "CCD_UPLOAD_MODE", { "LOCAL": true })) {
+					return false;
+				}
+			}
+			return true;
+		}
+
+		function workflowCheckActiveAgent() {
+			if (workflowState.running && workflowState.activeStep >= 0 && workflowProcessProperty(workflowState.activeStep) == null)
+				workflowFail("A required agent disconnected. The workflow has stopped.");
+		}
+
+		function workflowPropertyChanged(property) {
+			if (!workflowState.running || workflowState.activeStep < 0)
+				return;
+			if (property.device != workflowAgentForStep(workflowState.activeStep) || property.name != "AGENT_START_PROCESS")
+				return;
+			if (property.state == "Busy") {
+				workflowState.sawBusy = true;
+				workflowClearStartTimer();
+				workflowSetMessage(window.workflowSteps[workflowState.activeStep].title + " is in progress.", "info");
+			} else if (property.state == "Alert") {
+				workflowFail(window.workflowSteps[workflowState.activeStep].title + " failed. Check the agent status on its existing page.");
+			} else if (workflowState.sawBusy) {
+				workflowClearStartTimer();
+				workflowState.completedCount = workflowState.activeStep + 1;
+				workflowState.activeStep = -1;
+				if (workflowState.completedCount == window.workflowSteps.length) {
+					workflowState.running = false;
+					workflowClearMonitorTimer();
+					workflowSetMessage("Workflow complete. The configured capture batch has finished.", "success");
+				} else {
+					workflowSetMessage(window.workflowSteps[workflowState.completedCount - 1].title + " complete. Preparing " + window.workflowSteps[workflowState.completedCount].title + "...", "success");
+					setTimeout(workflowStartCurrentStep, 500);
+				}
+			}
+		}
+
+		function workflowStop() {
+			if (!workflowState.running || workflowState.activeStep < 0)
+				return;
+			var index = workflowState.activeStep;
+			var deviceName = workflowAgentForStep(index);
+			workflowClearStartTimer();
+			workflowClearMonitorTimer();
+			workflowState.running = false;
+			workflowState.cancelledStep = index;
+			workflowState.activeStep = -1;
+			if (workflowFindProperty(deviceName, "AGENT_ABORT_PROCESS") != null)
+				changeProperty(deviceName, "AGENT_ABORT_PROCESS", { "ABORT": true });
+			if (index == 3 && workflowFindProperty("Imager Agent", "CCD_ABORT_EXPOSURE") != null)
+				changeProperty("Imager Agent", "CCD_ABORT_EXPOSURE", { "ABORT_EXPOSURE": true });
+			workflowSetMessage("Workflow stopped. No further steps will start.", "warning");
+		}
+
+		window.workflowStop = workflowStop;
+
+		function workflowEnsureAgent(deviceName, driverName) {
+			if (INDIGO.devices[deviceName] != null)
+				return;
+			var server = INDIGO.devices["Server"];
+			var drivers = server != null ? server["DRIVERS"] : null;
+			if (drivers == null)
+				return;
+			var driver = drivers.item(driverName);
+			if (driver == null && !workflowRequestedDrivers[driverName]) {
+				workflowRequestedDrivers[driverName] = true;
+				changeProperty("Server", "LOAD", { "DRIVER": driverName });
+			} else if (driver != null && !driver.value && !workflowRequestedDrivers[driverName]) {
+				workflowRequestedDrivers[driverName] = true;
+				changeProperty("Server", "DRIVERS", { [driverName]: true });
+			}
+		}
+
+		function checkState() {
+			if (INDIGO.devices["Server"] == null)
+				return;
+			var hostTime = workflowFindProperty("Server", "HOST_TIME");
+			if (hostTime != null && hostTime.items.length > 0 && hostTime.items[0].value == "")
+				changeProperty("Server", "HOST_TIME", { "TIME": timestamp() });
+			workflowEnsureAgent("Mount Agent", "indigo_agent_mount");
+			workflowEnsureAgent("Imager Agent", "indigo_agent_imager");
+			workflowEnsureAgent("Guider Agent", "indigo_agent_guider");
+			if (INDIGO.devices["Platesolver Agent"] == null && INDIGO.devices["Astrometry Agent"] == null) {
+				var drivers = INDIGO.devices["Server"]["DRIVERS"];
+				if (drivers != null && drivers.item("indigo_agent_platesolver") != null)
+					workflowEnsureAgent("Platesolver Agent", "indigo_agent_platesolver");
+				else
+					workflowEnsureAgent("Astrometry Agent", "indigo_agent_astrometry");
+			}
+			guiSetup();
+		}
+
+		function onDefineProperty(property) {
+			checkState();
+			workflowPropertyChanged(property);
+			guiSetup();
+		}
+
+		function onUpdateProperty(property) {
+			if (property.device == "Server" && property.name == "DRIVERS")
+				workflowRequestedDrivers = {};
+			checkState();
+			workflowPropertyChanged(property);
+			guiSetup();
+		}
+
+		function onDeleteProperty(property) {
+			if (property != null && workflowState.running && (property.device == workflowAgentForStep(workflowState.activeStep) || property.device == "Server")) {
+				workflowClearStartTimer();
+				workflowState.running = false;
+				workflowState.failedStep = workflowState.activeStep;
+				workflowState.activeStep = -1;
+				workflowSetMessage("A required device disconnected. The workflow has stopped.", "danger");
+			} else {
+				guiSetup();
+			}
+		}
+	</script>
+	<script src="components.js"></script>
+	<script>
+		indigoURL = new URL((window.location.protocol == "https:" ? "wss://" : "ws://") + window.location.host);
+		guiSetup();
+		window.addEventListener("load", init, false);
+	</script>
+</html>
