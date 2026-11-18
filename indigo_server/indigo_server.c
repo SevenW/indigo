@@ -1952,6 +1952,11 @@ static void server_main() {
 			#include "resource/script.png.data"
 		};
 		indigo_server_add_resource("/script.png", script_png, sizeof(script_png), "image/png");
+		// INDIGO Imaging Workflow
+		static unsigned char workflow_html[] = {
+			#include "resource/workflow.html.data"
+		};
+		indigo_server_add_resource("/workflow.html", workflow_html, sizeof(workflow_html), "text/html");
 		static unsigned char sequencer_js[] = {
 			#include "resource/Sequencer.js.data"
 		};

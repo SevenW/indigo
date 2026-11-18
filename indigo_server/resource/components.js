@@ -2091,6 +2091,7 @@ app.component('indigo-navbar', {
 	data: function() {
 		return {
 			appLinks: [
+				{ id: "workflow", href: "workflow.html", icon: "imager.png", title: "Imaging Workflow" },
 				{ id: "imager", href: "imager.html", icon: "imager.png", title: "Imager" },
 				{ id: "mount", href: "mount.html", icon: "mount.png", title: "Mount" },
 				{ id: "guider", href: "guider.html", icon: "guider.png", title: "Guider" },
