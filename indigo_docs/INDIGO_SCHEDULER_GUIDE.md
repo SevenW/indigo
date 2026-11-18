@@ -176,7 +176,7 @@ Before the body runs, the scheduler defines a `scheduler_task` object from the h
 | Key | Syntax | Meaning | Default |
 |---|---|---|---|
 | `@task` | `name` | Name of the task, 1–40 bytes, without `\|`, unique (not case-sensitive) | required |
-| `@priority` | `urgent`, `high`, `normal` or `low`, optionally followed by a level 0–100 | Importance, see [Priorities](#priorities) | `normal 50` |
+| `@priority` | `urgent`, `high`, `normal` or `low`, optionally followed by a level 0–100, or `hook` without a level | Importance, see [Priorities](#priorities) | `normal 50` |
 | `@target` | `ra dec` | J2000 coordinates. RA in hours (`hh:mm:ss.s` or decimal), Dec in degrees (`±dd:mm:ss` or decimal). A task with a target also needs the target above the horizon | none |
 | `@altitude` | `> degrees` | Minimum target altitude, 0–90 | off |
 | `@airmass` | `< value` | Maximum airmass, 1–100 | off |
@@ -191,6 +191,9 @@ Before the body runs, the scheduler defines a `scheduler_task` object from the h
 | `@preempted` | `retry` or `fail` | What happens to this task when an urgent task interrupts it | `retry` |
 | `@enabled` | `yes` or `no` | A disabled task is kept but never selected | `yes` |
 | `@folder` | `name` or `none` | Save the frames of this task in the folder `name`, which several tasks may share, or in no folder of their own (the folder of the Imager Agent is left alone), 1–40 bytes, see [Where the data goes](#where-the-data-goes) | set by `FOLDER` |
+| `@observer` | text | The observer, written as the FITS header `OBSERVER` of the frames of the task, 1–56 characters (a quote counts as two), see [Where the data goes](#where-the-data-goes) | no header |
+| `@pi` | text | The principal investigator, written as the FITS header `PI_NAME`, same rules as `@observer` | no header |
+| `@project` | text | The project or proposal identifier, written as the FITS header `PROPID`, same rules as `@observer` | no header |
 
 `@altitude`, `@airmass`, `@ha`, `@moon` and `@illumination` need `@target`. The comparison signs are required: write `> 30`, not `30`. `>=` and `<=` are accepted and mean the same as `>` and `<`.
 
@@ -214,6 +217,8 @@ The check is made when the task starts, with the expected duration, in five-minu
 
   With the default weights of 1, the two bonuses together can add up to 200 points, more than the whole level range. A `normal 40` target that is high and about to set can therefore run before a `normal 60` target. To make the level decide strictly, set `SETTING_WEIGHT` and `ALTITUDE_WEIGHT` to 0 in [Settings](#settings); to make the sky position count more, raise them. The bonuses never cross a class: with the maximum weights of 4, the level and the bonuses together add at most 900 points, less than the 1000-point gap between classes.
 - When the scores are equal, the task higher in the task list wins. You can move tasks in the list, see [Changing the order](#changing-the-order).
+
+`hook` is a class of its own, without a level: `@priority hook` marks a hook-only task that is never scheduled as an ordinary task, see [Hooks](#hooks). `@priority hook 50` is a script error, and so are `@repeat`, `@retry`, `@enabled`, `@window`, `@altitude`, `@airmass`, `@ha`, `@moon`, `@illumination`, `@twilight` and `@preempted` in the same header, because a hook never uses them. `@duration` (it places the hook in the night plan), `@target` and the data keys stay valid; a hook run uses only `@folder <name>` of them, see [Where the data goes](#where-the-data-goes). A task submitted through `AGENT_SCHEDULER_URGENT_TASK` cannot be a hook.
 
 `urgent` is different from the other classes:
 
@@ -320,10 +325,11 @@ Checkpoints act only where the sequence reaches them: an exposure, a slew or a f
 
 ### Where the data goes
 
-By default the frames of all tasks are saved by the Imager Agent into the same folder, with the object name and the FITS headers it holds at that moment. The scheduler can tell the frames which task made them. Before every run of a task or a hook, and before the body starts, it sets on the Imager Agent:
+By default the frames of all tasks are saved by the Imager Agent into the same folder, with the object name and the FITS headers it holds at that moment. The scheduler can tell the frames which task made them. Before every run of a task, and before the body starts, it sets on the Imager Agent:
 
 - the **object name** (`CCD_LOCAL_MODE.OBJECT`) to the task name, so `%o` in the file name prefix stands for the task;
 - the FITS keywords `SCHTASK` (the task name, in quotes), `SCHRUN` (the run number, as `scheduler_task.run`) and `SCHNIGHT` (the date of the session night, the same as `%N` in the file name prefix, for example `'2026-11-16'`). Use `SCHNIGHT` to match flats and darks with the lights of the same night;
+- the FITS keywords `OBSERVER`, `PI_NAME` and `PROPID` from the task header keys `@observer`, `@pi` and `@project`, only for the keys the task gives, so that the frames of a group or a project can be told apart;
 - the **folder** (`CCD_LOCAL_MODE.DIR`) to a folder of its own, if you ask for it.
 
 `AGENT_SCHEDULER_DATA` switches the three on and off:
@@ -331,7 +337,7 @@ By default the frames of all tasks are saved by the Imager Agent into the same f
 | Item | Default | Meaning |
 |---|---|---|
 | `OBJECT` | on | Set the object name to the task name |
-| `FITS` | on | Set `SCHTASK`, `SCHRUN` and `SCHNIGHT` |
+| `FITS` | on | Set `SCHTASK`, `SCHRUN` and `SCHNIGHT`, and `OBSERVER`, `PI_NAME` and `PROPID` for the tasks that have the keys |
 | `FOLDER` | off | Save every task in a subfolder named after it |
 
 The folder is `<base>/<name>/`. The base is `AGENT_SCHEDULER_DATA_DIR.BASE`; when it is empty, the base is the folder the Imager Agent had when the scheduler was started. The name is the task name, or the `@folder` of the task, with every character that the CCD driver does not allow in a file name replaced by `_`. The key decides for one task, with `FOLDER` on or off:
@@ -343,11 +349,23 @@ The folder is `<base>/<name>/`. The base is `AGENT_SCHEDULER_DATA_DIR.BASE`; whe
 
 `@folder M31` saves the task in `<base>/M31/` also when `FOLDER` is off, so several tasks, for example the lights and the flats of a target, share a folder. `@folder none` keeps the task out of a folder of its own: the scheduler leaves the folder of the Imager Agent alone, as with `FOLDER` off, so the task saves wherever the Imager Agent saves, and `BASE` applies only to tasks that use a folder.
 
-After every run, whatever its outcome (succeeded, failed, preempted or aborted), the scheduler puts the folder and the object name back as it found them and removes the three keywords. A task that has to change them for a part of its run still can: `sequence.set_object_name()`, `sequence.set_directory()` and `sequence.set_fits_header()` run after the scheduler has set its values and win, but only until the end of that run. In particular, a `set_directory()` of a task no longer stays for the next task.
+To identify the frames of a group or a project, give the task the observer, the principal investigator and the project:
+
+```javascript
+// @task Lights M31
+// @observer Jane Doe
+// @pi Prof. Smith
+// @project SURVEY-7
+```
+
+The frames then carry `OBSERVER = 'Jane Doe'`, `PI_NAME = 'Prof. Smith'` and `PROPID = 'SURVEY-7'` (with `FITS` on). Each key is optional and sets only its own header.
+
+After every task run, whatever its outcome (succeeded, failed, preempted or aborted), the scheduler puts the folder and the object name back as it found them and removes the keywords it set (`SCHTASK`, `SCHRUN`, `SCHNIGHT` and the ones from `@observer`, `@pi` and `@project`). A task that has to change them for a part of its run still can: `sequence.set_object_name()`, `sequence.set_directory()` and `sequence.set_fits_header()` run after the scheduler has set its values and win, but only until the end of that run. In particular, a `set_directory()` of a task no longer stays for the next task. A hook run with `@folder <name>` gets its folder and object name back in the same way. For any other hook run the scheduler sets nothing and puts nothing back, so a folder or object name that the hook script sets stays after the hook.
 
 Notes:
 
 - Nothing is set or restored when the Imager Agent is not loaded or has no `CCD_LOCAL_MODE`.
+- Hooks are not labelled: a hook run sets no object name, no FITS keywords and no folder from `FOLDER`. A hook may deselect the camera, for example a shutdown hook with `sequence.select_imager_camera("NONE")`, and the scheduler could not put the camera back afterwards. Only `@folder <name>` in the header of a hook task gives that hook its folder, which is put back after the hook as for a task; a hook with `@folder <name>` must not deselect or disconnect the camera. Without `@folder`, or with `@folder none`, a hook leaves the folder alone.
 - Only the agent named "Imager Agent" is labelled. A script that works with another imager agent gets no labels.
 - Changes of the settings take effect at the next run. The duration estimate of a task never sets anything.
 
@@ -558,10 +576,13 @@ indigo_prop_tool set "Scheduler Agent.AGENT_SCHEDULER_HOOKS.STARTUP=Unpark;SHUTD
 The mount is unparked on `START`, parked when nothing can run for `IDLE_PARK_AFTER` minutes, unparked again before the next task, and parked when the scheduler stops.
 
 - Hooks name their tasks: renaming a hook task with an edit detaches it from the hook.
-- A hook task is never scheduled as an ordinary task. Its header constraints are ignored, so they never keep it from running. The task list shows it as `STARTUP HOOK`, `SHUTDOWN HOOK`, `IDLE HOOK`, `NIGHT START HOOK`, `NIGHT END HOOK` or `RESUME HOOK`.
+- A hook task is never scheduled as an ordinary task. Its header constraints are ignored, so they never keep it from running. The task list shows it with the state `HOOK` and its hook in the priority column: `hook startup`, `hook shutdown`, `hook idle`, `hook night start`, `hook night end` or `hook resume`, for example `Park | HOOK | hook shutdown | - | - | -`.
+- A hook task that you disable with `DISABLE` (or `@enabled no`) does not run: the scheduler sends a message such as `The idle hook 'Park' is disabled, skipped` and continues as it does for a hook that names no task, and the message is not repeated within one idle period. `ENABLE` makes it run again from the next occasion. The night plan does not include a disabled hook. The task list shows it with the state `DISABLED` and its hook in the priority column, for example `Park | DISABLED | hook idle | - | - | -`.
 - One task may serve several hooks, for example `Park` as `SHUTDOWN`, `IDLE` and `NIGHT_END`. The task list shows the first of them. When two hooks naming the same task are due one right after the other, such as `STARTUP` and `NIGHT_START` on `START` during the night, the task runs once.
-- Hook runs appear in the history, marked `(hook)`.
-- To remove a hook, set its item to an empty value, for example `indigo_prop_tool set "Scheduler Agent.AGENT_SCHEDULER_HOOKS.IDLE="`. Its task then becomes an ordinary task again and is scheduled like the others.
+- Hook runs appear in the history with `hook` in the kind column.
+- Hook runs are not labelled with the object name, the FITS keywords or a folder of their own, see [Where the data goes](#where-the-data-goes). Only `@folder <name>` gives a hook a folder.
+- A task with `@priority hook` is a hook only: it is never scheduled as an ordinary task, also while no hook names it. Upload the task with `@priority hook` first, so that it does not run at once on a running scheduler, then name it in `AGENT_SCHEDULER_HOOKS`; the header does not name the hook role. It has no level and is not in the night plan.
+- To remove a hook, set its item to an empty value, for example `indigo_prop_tool set "Scheduler Agent.AGENT_SCHEDULER_HOOKS.IDLE="`. Its task then becomes an ordinary task again and is scheduled like the others, unless it has `@priority hook`.
 
 ### Several nights
 
@@ -736,7 +757,7 @@ SN 2026abc | RUNNING | urgent | run 0/1 | retries left 0 | 0h30 set
 Park | HOOK | hook shutdown | - | - | -
 ```
 
-The priority is `urgent`, the class and level of the task such as `normal 60`, or for a task that serves as a hook `hook startup`, `hook shutdown`, `hook idle`, `hook night start`, `hook night end` or `hook resume`. The runs are `run <done>/<repeat>` and the retries `retries left <n>`, always shown. The duration is the hours and minutes followed by its source (`set`, `measured`, `estimated` or `default`). A hook has `-` for the runs, retries and duration.
+The priority is `urgent`, the class and level of the task such as `normal 60`, or for a task that serves as a hook `hook startup`, `hook shutdown`, `hook idle`, `hook night start`, `hook night end` or `hook resume`, and `hook` for a task with `@priority hook` that no hook names. The runs are `run <done>/<repeat>` and the retries `retries left <n>`, always shown. The duration is the hours and minutes followed by its source (`set`, `measured`, `estimated` or `default`). A hook has `-` for the runs, retries and duration.
 
 | State | Light | Meaning |
 |---|---|---|
@@ -748,9 +769,9 @@ The priority is `urgent`, the class and level of the task such as `normal 60`, o
 | DONE | Ok | All runs completed |
 | FAILED | Alert | Failed with no retries left, or interrupted with `@preempted fail` |
 | EXPIRED | Alert | The end of its `@window` passed before it completed |
-| DISABLED | Idle | `@enabled no`, or disabled by command |
+| DISABLED | Idle | `@enabled no`, or disabled by command; a disabled hook task shows it too, with its hook in the priority column |
 | SCRIPT ERROR | Alert | The body has an error; fix it with an edit |
-| HOOK | Idle | The task is named in `AGENT_SCHEDULER_HOOKS`; its state is not tracked |
+| HOOK | Idle | The task is named in `AGENT_SCHEDULER_HOOKS` or has `@priority hook`; its state is not tracked |
 
 ### The night plan
 
@@ -766,7 +787,8 @@ The priority is `urgent`, the class and level of the task such as `normal 60`, o
 ```
 
 - Each run shows its expected UTC start and end, the task, the run number of a repeated task and the priority. The night hooks appear at their expected times with `-` as the run and `hook night start` or `hook night end` as the priority.
-- The state is `RUNNING` (Busy light) for the running task and `PLANNED` (Idle light) for planned runs.
+- The state is `RUNNING` (Busy light) for the running task or hook and `PLANNED` (Idle light) for planned runs.
+- While a hook runs, whatever its kind (`hook startup`, `hook shutdown`, `hook idle`, `hook night start`, `hook night end` or `hook resume`), it is the first item, for example `2026-11-20 19:58-20:03 | Evening | - | hook night start | RUNNING | -`. Its end is its start plus its duration, but not earlier than a minute from now, and the planned runs follow from that end. A running night hook replaces its planned item, and the item disappears when the hook ends. Only the night hooks are forecast; `STARTUP`, `SHUTDOWN`, `IDLE` and `RESUME` show up only while they run.
 - After the runs come the tasks that will not run tonight, with an Alert light, `-` as the time, the state `NOT TONIGHT` and the reason. Typical reasons are a constraint that never holds tonight (see [Reasons](#reasons)), `disabled`, `script error`, or `no time left tonight` for a task that could run but finds no room after the others. A day without night, with night hooks set, adds the item `- | - | - | - | NOT TONIGHT | no night at the night limit within a day, the night hooks do not run`.
 - During the day the plan shows the coming night. When the night of the night hooks ends after sunrise, the plan lasts until it ends. It is shown also while the scheduler is stopped, as the plan that `START` would follow.
 
@@ -774,13 +796,13 @@ The plan is a forecast. It assumes that every run succeeds and takes its expecte
 
 ### The history
 
-`AGENT_SCHEDULER_HISTORY` lists the finished runs, newest first, up to 200. The columns are when, name, run, kind (`task`, `urgent` or `hook`), result and reason:
+`AGENT_SCHEDULER_HISTORY` lists the finished runs, oldest first, newest last, up to 200. The columns are when, name, run, kind (`task`, `urgent` or `hook`), result and reason:
 
 ```
-2026-11-21 01:28-03:31 | NGC 7000 Ha | run 1 | task | SUCCEEDED | -
-2026-11-20 21:10-21:40 | SN 2026abc | run 1 | urgent | SUCCEEDED | -
-2026-11-20 20:44-21:10 | M31 LRGB | run 1 | task | PREEMPTED | by SN 2026abc
 2026-11-20 20:02-20:04 | Evening | run 1 | hook | SUCCEEDED | -
+2026-11-20 20:44-21:10 | M31 LRGB | run 1 | task | PREEMPTED | by SN 2026abc
+2026-11-20 21:10-21:40 | SN 2026abc | run 1 | urgent | SUCCEEDED | -
+2026-11-21 01:28-03:31 | NGC 7000 Ha | run 1 | task | SUCCEEDED | -
 ```
 
 | Result | Light | Meaning |
@@ -860,11 +882,11 @@ indigo_prop_tool set "Scheduler Agent.AGENT_SCHEDULER_TASK_COMMAND.DISABLE=ON"
 | Command | What it does |
 |---|---|
 | `RESET` | Puts the task back to QUEUED and clears its run and retry counters. Use it to run a DONE, FAILED or EXPIRED task again, or to retry a task after a script error. A running task cannot be reset |
-| `DISABLE` | Keeps the task but never selects it. A running task finishes its run first |
+| `DISABLE` | Keeps the task but never selects it; a hook task is skipped like a hook that names no task. A running task finishes its run first |
 | `ENABLE` | Undoes `DISABLE`. A task with `@enabled no` in its header stays disabled until you edit the header |
 | `MOVE_UP`, `MOVE_DOWN` | Moves the task in the list. The list order decides only between otherwise equal tasks |
 | `RESET_ALL` | Resets every task as `RESET` does. A running task is left alone, and the message says so. Pending urgent tasks keep their order |
-| `DELETE_ALL` | Deletes every stored and urgent task except the tasks named as hooks, so the preparation and the parking at the end of the night stay. It is accepted only while the scheduler is stopped. To delete a hook task, use `AGENT_SCHEDULER_DELETE_TASK` |
+| `DELETE_ALL` | Deletes every stored and urgent task except the tasks named as hooks and the tasks with `@priority hook`, so the preparation and the parking at the end of the night stay. It is accepted only while the scheduler is stopped. To delete a hook task, use `AGENT_SCHEDULER_DELETE_TASK` |
 
 `RESET_ALL` and `DELETE_ALL` do not use the task name. They carry a `warn_on_set` hint, so clients that follow INDIGO hints ask for a confirmation first. Command-line tools and scripts do not ask:
 
@@ -945,7 +967,7 @@ It puts the site on the equator and moves its longitude to choose the time of da
 | `hooks idle=Park resume=` | Set or clear hook items |
 | `limit nautical`, `set NIGHT_START_OFFSET=-30` | The night limit and the settings |
 | `start`, `stop`, `abort`, `reset NAME`, `delete NAME` | Control the scheduler and the tasks |
-| `reset_all`, `delete_all` | Reset every task, or delete every task not named as a hook; the sandbox prompt does not ask for a confirmation |
+| `reset_all`, `delete_all` | Reset every task, or delete every task that is not a hook task; the sandbox prompt does not ask for a confirmation |
 | `status`, `plan`, `history` | The task list, the night plan and the history |
 | `wait 10`, `until TEXT 60` | Wait while new scheduler messages are printed, or until one contains `TEXT` |
 

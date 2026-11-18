@@ -51,6 +51,12 @@
 #define KEY_PREEMPTED			0x2000
 #define KEY_ENABLED				0x4000
 #define KEY_FOLDER				0x8000
+#define KEY_OBSERVER			0x10000
+#define KEY_PI						0x20000
+#define KEY_PROJECT				0x40000
+
+// the keys a hook never uses
+#define HOOK_REJECTED_KEYS (KEY_ENABLED | KEY_ALTITUDE | KEY_AIRMASS | KEY_HA | KEY_MOON | KEY_ILLUMINATION | KEY_TWILIGHT | KEY_WINDOW | KEY_REPEAT | KEY_RETRY | KEY_PREEMPTED)
 
 typedef struct {
 	const char *name;
@@ -74,6 +80,9 @@ static const key_definition keys[] = {
 	{ "preempted", KEY_PREEMPTED },
 	{ "enabled", KEY_ENABLED },
 	{ "folder", KEY_FOLDER },
+	{ "observer", KEY_OBSERVER },
+	{ "pi", KEY_PI },
+	{ "project", KEY_PROJECT },
 	{ NULL, 0 }
 };
 
@@ -285,6 +294,22 @@ static bool parse_keyword(const char *token, const char **words, int count, int 
 	return false;
 }
 
+// a FITS string value of the data headers: no control characters, at most SCHEDULER_FITS_TEXT_SIZE - 1 characters once the quotes inside it are doubled
+static bool parse_fits_text(const char *value, char *text) {
+	size_t length = 0;
+	for (const char *c = value; *c; c++) {
+		if ((unsigned char)*c < 0x20 || *c == 0x7f) {
+			return false;
+		}
+		length += *c == '\'' ? 2 : 1;
+	}
+	if (length == 0 || length >= SCHEDULER_FITS_TEXT_SIZE) {
+		return false;
+	}
+	strcpy(text, value);
+	return true;
+}
+
 static bool parse_value(int key, char *value, scheduler_header *header, const char **expected) {
 	char *tokens[5];
 	int count;
@@ -305,11 +330,14 @@ static bool parse_value(int key, char *value, scheduler_header *header, const ch
 			return true;
 		}
 		case KEY_PRIORITY: {
-			static const char *classes[] = { "low", "normal", "high", "urgent" };
+			static const char *classes[] = { "low", "normal", "high", "urgent", "hook" };
 			int priority_class;
-			*expected = "'urgent', 'high', 'normal' or 'low' optionally followed by a level 0-100";
+			*expected = "'urgent', 'high', 'normal' or 'low' optionally followed by a level 0-100, or 'hook' without a level";
 			count = tokenize(value, tokens, 2);
-			if (count < 1 || count > 2 || !parse_keyword(tokens[0], classes, 4, &priority_class)) {
+			if (count < 1 || count > 2 || !parse_keyword(tokens[0], classes, 5, &priority_class)) {
+				return false;
+			}
+			if (priority_class == SCHEDULER_PRIORITY_HOOK && count == 2) {
 				return false;
 			}
 			header->priority_class = priority_class;
@@ -453,6 +481,15 @@ static bool parse_value(int key, char *value, scheduler_header *header, const ch
 			}
 			return true;
 		}
+		case KEY_OBSERVER:
+			*expected = "a text of 1 to 56 characters, a quote counting as two";
+			return parse_fits_text(value, header->observer);
+		case KEY_PI:
+			*expected = "a text of 1 to 56 characters, a quote counting as two";
+			return parse_fits_text(value, header->pi);
+		case KEY_PROJECT:
+			*expected = "a text of 1 to 56 characters, a quote counting as two";
+			return parse_fits_text(value, header->project);
 	}
 	return false;
 }
@@ -480,6 +517,8 @@ bool indigo_scheduler_parse_header(const char *text, scheduler_header *header, s
 		s += 3;
 	}
 	int found = 0;
+	int priority_line = 0, conflict_line = 0;
+	char conflict_key[32] = "";
 	int line_number = 0;
 	while (*s) {
 		const char *end = strchr(s, '\n');
@@ -542,6 +581,12 @@ bool indigo_scheduler_parse_header(const char *text, scheduler_header *header, s
 			return false;
 		}
 		found |= mask;
+		if (mask == KEY_PRIORITY) {
+			priority_line = line_number;
+		} else if ((mask & HOOK_REJECTED_KEYS) && conflict_line == 0) {
+			conflict_line = line_number;
+			strcpy(conflict_key, key);
+		}
 		char value[LINE_SIZE];
 		strcpy(value, skip_blanks(c));
 		const char *expected = "a valid value";
@@ -557,6 +602,10 @@ bool indigo_scheduler_parse_header(const char *text, scheduler_header *header, s
 	}
 	if (!header->has_target && (found & (KEY_ALTITUDE | KEY_AIRMASS | KEY_HA | KEY_MOON | KEY_ILLUMINATION))) {
 		snprintf(error, error_size, "@altitude, @airmass, @ha, @moon and @illumination require @target");
+		return false;
+	}
+	if (header->priority_class == SCHEDULER_PRIORITY_HOOK && conflict_line) {
+		snprintf(error, error_size, "line %d: @%s: not allowed with @priority hook", conflict_line > priority_line ? conflict_line : priority_line, conflict_key);
 		return false;
 	}
 	const char *body = s;
@@ -591,6 +640,8 @@ const char *indigo_scheduler_priority_name(scheduler_priority_class priority_cla
 			return "high";
 		case SCHEDULER_PRIORITY_URGENT:
 			return "urgent";
+		case SCHEDULER_PRIORITY_HOOK:
+			return "hook";
 	}
 	return "normal";
 }
