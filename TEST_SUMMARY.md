@@ -39,8 +39,11 @@
 |  | 2026-10-19 11:54 | 3.0.0.28 | mac arm64 | simulator | 76 / 76 | ✅ OK |
 | agent_platesolver | 2026-10-30 13:43 | 3.0.0.25 | linux x64 | simulator | 154 / 154 | ✅ OK |
 |  | 2026-11-01 21:08 | 3.0.0.27 | mac arm64 | simulator | 159 / 159 | ✅ OK |
+| agent_scheduler | 2026-11-13 02:27 | 3.0.0.5 | linux arm64 | simulator | 43 / 43 | ✅ OK |
+|  | 2026-11-14 12:54 | 3.0.0.9 | linux x64 | simulator | 82 / 82 | ✅ OK |
 | agent_scripting | 2026-09-24 12:56 | 3.0.0.13 | linux x64 | simulator | 60 / 60 | ✅ OK |
-|  | 2026-11-05 13:28 | 3.0.0.15 | mac arm64 | simulator | 241 / 239 | ❌ Failed |
+|  | 2026-11-13 00:36 | 3.0.0.17 | linux arm64 | simulator | 238 / 236 | ❌ Failed |
+|  | 2026-11-15 15:15 | 3.0.0.18 | mac arm64 | simulator | 239 / 238 | ❌ Failed |
 | ao_sx | 2026-09-20 23:43 | 3.0.0.13 | mac arm64 | SX AO-L | 16 / 16 | ✅ OK |
 |  | 2026-09-27 21:22 | 3.0.0.15 | mac arm64 | simulator | 11 / 11 | ✅ OK |
 |  | 2026-09-30 18:14 | 3.0.0.15 | linux arm64 | StarlightXpress AO | 16 / 16 | ✅ OK |
@@ -396,8 +399,8 @@
 |  | 2026-10-04 11:20 | 3.0.0.15 | linux arm64 | simulator | 29 / 29 | ✅ OK |
 |  | 2026-10-07 03:01 | 3.0.0.18 | linux arm64 | AstroEQ 8.25 (ESP32-S3) | 19 / 19 | ✅ OK |
 |  | 2026-10-07 07:05 | 3.0.0.18 | linux arm64 | AZGTi | 19 / 19 | ✅ OK |
-|  | 2026-10-23 21:14 | 3.0.0.21 | mac arm64 | AZGTi | 19 / 19 | ✅ OK |
-|  | 2026-11-07 00:30 | 3.0.0.22 | mac arm64 | simulator | 96 / 96 | ✅ OK |
+|  | 2026-11-18 21:50 | 3.0.0.22 | mac arm64 | AZGTi | 20 / 20 | ✅ OK |
+|  | 2026-11-18 22:14 | 3.0.0.22 | mac arm64 | simulator | 97 / 97 | ✅ OK |
 | mount_temma | 2026-09-23 13:37 | 3.0.0.15 | mac arm64 | MountSim 2.3 (Temma) | 12 / 12 | ✅ OK |
 |  | 2026-09-27 00:16 | 3.0.0.22 | linux x64 | simulator | 15 / 15 | ✅ OK |
 |  | 2026-10-26 19:41 | 3.0.0.27 | mac arm64 | simulator | 30 / 30 | ✅ OK |

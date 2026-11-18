@@ -62,6 +62,9 @@ static indigo_property *config_load_property, *drivers_property, *solver_exposur
 static char test_root[256], messages[131072];
 static atomic_int message_count;
 static atomic_int orchestration_changes;
+// SEQUENCE_FAILURE.MESSAGE delivered before the SEQUENCE_STATE update that started the last sequence and before the last one that ended a sequence Alert
+static char failure_at_start[INDIGO_VALUE_SIZE], failure_at_alert[INDIGO_VALUE_SIZE];
+static int alert_count;
 // the solver stand-in reports a failed solve on AGENT_START_PROCESS
 static atomic_bool solver_process_fails;
 static bool bus_started, observer_attached, peers_attached, ccd_started, mount_started, dome_started, gps_started, rotator_started, imager_started, mount_agent_started, guider_started, scripting_started;
@@ -169,9 +172,25 @@ static observation *find_observation(const char *device, const char *name) {
 	return free_entry;
 }
 
+// SEQUENCE_FAILURE.MESSAGE as delivered when SEQUENCE_STATE is updated, called with cache_mutex locked
+static void delivered_failure(char *text) {
+	observation *failure = find_observation(SCRIPTING, "SEQUENCE_FAILURE");
+	indigo_item *item = failure && failure->property ? indigo_get_item(failure->property, "MESSAGE") : NULL;
+	snprintf(text, INDIGO_VALUE_SIZE, "%s", item ? indigo_get_text_item_value(item) : "<undefined>");
+}
+
 static indigo_result observe(indigo_device *device, indigo_property *property) {
 	pthread_mutex_lock(&cache_mutex);
 	observation *entry = find_observation(property->device, property->name);
+	if (entry && !strcmp(property->device, SCRIPTING) && !strcmp(property->name, "SEQUENCE_STATE")) {
+		bool was_busy = entry->property && entry->property->state == INDIGO_BUSY_STATE;
+		if (property->state == INDIGO_BUSY_STATE && !was_busy) {
+			delivered_failure(failure_at_start);
+		} else if (property->state == INDIGO_ALERT_STATE && was_busy) {
+			delivered_failure(failure_at_alert);
+			alert_count++;
+		}
+	}
 	if (entry) {
 		indigo_release_property(entry->property);
 		entry->property = indigo_copy_property(NULL, property);
@@ -381,6 +400,49 @@ static bool wait_exists(const char *device, const char *name, double timeout) {
 	return false;
 }
 
+#define MISSING_AGENT_FAILURE "Failed to set 'CCD_FRAME_TYPE' on 'Missing Agent'"
+
+// the published SEQUENCE_FAILURE.MESSAGE
+static bool failure_is(const char *text) {
+	indigo_property *property = snapshot(SCRIPTING, "SEQUENCE_FAILURE");
+	indigo_item *item = property ? indigo_get_item(property, "MESSAGE") : NULL;
+	bool result = item && !strcmp(indigo_get_text_item_value(item), text);
+	if (!result) {
+		fprintf(stderr, "SEQUENCE_FAILURE.MESSAGE is '%s', expected '%s'\n", item ? indigo_get_text_item_value(item) : "<undefined>", text);
+	}
+	indigo_release_property(property);
+	return result;
+}
+
+static int alerts(void) {
+	pthread_mutex_lock(&cache_mutex);
+	int result = alert_count;
+	pthread_mutex_unlock(&cache_mutex);
+	return result;
+}
+
+// one more sequence ended Alert since alerts_before, and SEQUENCE_FAILURE.MESSAGE was the text when that SEQUENCE_STATE update arrived
+static bool failed_with(int alerts_before, const char *text) {
+	pthread_mutex_lock(&cache_mutex);
+	bool result = alert_count == alerts_before + 1 && !strcmp(failure_at_alert, text);
+	if (!result) {
+		fprintf(stderr, "%d sequences ended Alert (expected %d), SEQUENCE_FAILURE.MESSAGE before the end '%s', expected '%s'\n", alert_count, alerts_before + 1, failure_at_alert, text);
+	}
+	pthread_mutex_unlock(&cache_mutex);
+	return result;
+}
+
+// SEQUENCE_FAILURE.MESSAGE was the text when the SEQUENCE_STATE update that started the last sequence arrived
+static bool started_with(const char *text) {
+	pthread_mutex_lock(&cache_mutex);
+	bool result = !strcmp(failure_at_start, text);
+	if (!result) {
+		fprintf(stderr, "SEQUENCE_FAILURE.MESSAGE at the start '%s', expected '%s'\n", failure_at_start, text);
+	}
+	pthread_mutex_unlock(&cache_mutex);
+	return result;
+}
+
 static bool setup(void) {
 	indigo_set_log_level(getenv("INDIGO_TEST_DEBUG") ? INDIGO_LOG_DEBUG : INDIGO_LOG_ERROR);
 	REQUIRE(indigo_start() == INDIGO_OK);
@@ -471,9 +533,9 @@ static void cleanup(void) {
 
 static void library_inventory(void) {
 	ASSERT_TRUE(check_js("typeof Sequence==='function'"));
-	ASSERT_TRUE(check_js("(function(){var names=Object.getOwnPropertyNames(Sequence.prototype); if(names.length!==109) throw new Error('prototype count '+names.length); return true})()"));
+	ASSERT_TRUE(check_js("(function(){var names=Object.getOwnPropertyNames(Sequence.prototype); if(names.length!==110) throw new Error('prototype count '+names.length); return true})()"));
 	ASSERT_TRUE(check_js("indigo_event_handlers.indigo_sequencer===indigo_sequencer"));
-	const char *properties[] = { "SEQUENCE_NAME", "SEQUENCE_STATE", "SEQUENCE_STEP_STATE", "AGENT_ABORT_PROCESS", "AGENT_PAUSE_PROCESS", "SEQUENCE_RESET", "FLIPPER_STATE" };
+	const char *properties[] = { "SEQUENCE_NAME", "SEQUENCE_STATE", "SEQUENCE_FAILURE", "SEQUENCE_STEP_STATE", "AGENT_ABORT_PROCESS", "AGENT_PAUSE_PROCESS", "SEQUENCE_RESET", "FLIPPER_STATE" };
 	for (unsigned i = 0; i < ARRAY_SIZE(properties); i++) {
 		indigo_property *property = snapshot(SCRIPTING, properties[i]);
 		ASSERT_TRUE(property != NULL);
@@ -494,6 +556,14 @@ static void published_property_schema(void) {
 	ASSERT_EQ_INT(INDIGO_RO_PERM, property->perm);
 	ASSERT_EQ_INT(5, property->count);
 	indigo_release_property(property);
+	property = snapshot(SCRIPTING, "SEQUENCE_FAILURE");
+	ASSERT_TRUE(property != NULL);
+	ASSERT_EQ_INT(INDIGO_TEXT_VECTOR, property->type);
+	ASSERT_EQ_INT(INDIGO_RO_PERM, property->perm);
+	ASSERT_EQ_INT(1, property->count);
+	ASSERT_TRUE(indigo_get_item(property, "MESSAGE") != NULL);
+	indigo_release_property(property);
+	ASSERT_TRUE(failure_is(""));
 	property = snapshot(SCRIPTING, "SEQUENCE_STEP_STATE");
 	ASSERT_TRUE(property != NULL);
 	ASSERT_EQ_INT(INDIGO_LIGHT_VECTOR, property->type);
@@ -529,9 +599,9 @@ static void focus_batch_snapshot(void) {
 }
 
 static void all_public_constructors(void) {
-	ASSERT_TRUE(run_js("publicMethods=Object.getOwnPropertyNames(Sequence.prototype).filter(function(n){return n!=='constructor'}); publicCalls={}; publicMethods.forEach(function(n){var original=Sequence.prototype[n]; Sequence.prototype[n]=function(){publicCalls[n]=(publicCalls[n]||0)+1; return original.apply(this,arguments)}}); var s=new Sequence('all'); s.enable_reset_loop_content_state(); s.disable_reset_loop_content_state(); s.repeat(1,function(){s.send_message('loop')}); s.enable_verbose(); s.disable_verbose(); s.recovery_point(); s.wait(0); s.wait_until(1704112495); s.continue_on_failure(); s.recover_on_failure(); s.abort_on_failure(); s.break_at(1704112495); s.break_at_ha('01:00:00'); s.wait_until_solar_altitude_below(91); s.wait_until_target_altitude_above(-91,1,2); s.break_if_solar_altitude_above(91); s.break_if_target_altitude_below(-91,1,2); s.resume_point(); s.evaluate('testValue=1'); s.send_message('message'); s.load_config('Config'); s.load_driver('Driver'); s.unload_driver('Driver'); s.select_imager_agent('Imager Agent'); s.select_mount_agent('Mount Agent'); s.select_guider_agent('Guider Agent'); s.select_solver_agent('Astrometry Agent'); s.select_imager_camera('CCD Imager Simulator'); s.select_filter_wheel('CCD Imager Simulator (wheel)'); s.select_focuser('CCD Imager Simulator (focuser)'); s.select_rotator('Field Rotator Simulator'); s.select_mount('Mount Simulator'); s.select_dome('Dome Simulator'); s.select_gps('GPS Simulator'); s.select_guider_camera('CCD Guider Simulator'); s.select_guider('CCD Guider Simulator (guider)'); s.select_frame_type('Light'); s.select_image_format('RAW'); s.set_frame(0,0,100,100); s.reset_frame(); s.select_camera_mode('BIN_1x1'); s.set_gain(10); s.set_offset(5); s.set_gamma(1); s.select_program('M'); s.select_aperture('f/4'); s.select_shutter('1/10'); s.select_iso('800'); s.enable_cooler(-10); s.disable_cooler(); s.enable_dithering(2,3,4); s.disable_dithering(); s.enable_meridian_flip(true,0); s.disable_meridian_flip(); s.enable_filter_offsets(); s.disable_filter_offsets(); s.set_fits_header('OBJECT','M42'); s.remove_fits_header('OBJECT'); s.select_filter('L'); s.set_directory('/tmp'); s.set_file_template('frame'); s.set_object_name('M42'); s.start_preview(0.1); s.stop_preview(); s.capture_batch(2,0.1); s.capture_batch('batch',2,0.1); s.capture_stream(2,0.1); s.capture_stream('stream',2,0.1); s.set_manual_focuser_mode(); s.set_automatic_focuser_mode(); s.focus(0.1); s.focus_ignore_failure(0.1); s.clear_focuser_selection(); s.set_focuser_position(100); s.slew(1,2); s.park(); s.unpark(); s.home(); s.enable_tracking(); s.disable_tracking(); s.dome_slew(90); s.dome_park(); s.dome_unpark(); s.dome_open(); s.dome_close(); s.enable_ha_limit(); s.disable_ha_limit(); s.enable_time_limit(); s.disable_time_limit(); s.enable_dome_slaving(); s.disable_dome_slaving(); s.make_dome_slaving_persistent(); s.make_dome_slaving_not_persistent(); s.enable_field_derotation(); s.disable_field_derotation(); s.make_field_derotation_persistent(); s.make_field_derotation_not_persistent(); s.enable_joystick_control(); s.disable_joystick_control(); s.wait_for_gps(); s.calibrate_guiding(); s.calibrate_guiding(0.1); s.calibrate_guiding(0.1,0.4); s.start_guiding(); s.start_guiding(0.1); s.start_guiding_exposure(0.1); s.stop_guiding(); s.clear_guider_selection(); s.set_solver_filter('L'); s.sync_center(0.1); s.precise_goto(0.1,1,2); s.set_rotator_angle(45); new Sequence('start').start();"));
+	ASSERT_TRUE(run_js("publicMethods=Object.getOwnPropertyNames(Sequence.prototype).filter(function(n){return n!=='constructor'}); publicCalls={}; publicMethods.forEach(function(n){var original=Sequence.prototype[n]; Sequence.prototype[n]=function(){publicCalls[n]=(publicCalls[n]||0)+1; return original.apply(this,arguments)}}); var s=new Sequence('all'); s.enable_reset_loop_content_state(); s.disable_reset_loop_content_state(); s.repeat(1,function(){s.send_message('loop')}); s.enable_verbose(); s.disable_verbose(); s.recovery_point(); s.wait(0); s.wait_until(1704112495); s.continue_on_failure(); s.recover_on_failure(); s.abort_on_failure(); s.break_at(1704112495); s.break_at_ha('01:00:00'); s.wait_until_solar_altitude_below(91); s.wait_until_target_altitude_above(-91,1,2); s.break_if_solar_altitude_above(91); s.break_if_target_altitude_below(-91,1,2); s.resume_point(); s.evaluate('testValue=1'); s.send_message('message'); s.load_config('Config'); s.load_driver('Driver'); s.unload_driver('Driver'); s.select_imager_agent('Imager Agent'); s.select_mount_agent('Mount Agent'); s.select_guider_agent('Guider Agent'); s.select_solver_agent('Astrometry Agent'); s.select_imager_camera('CCD Imager Simulator'); s.select_filter_wheel('CCD Imager Simulator (wheel)'); s.select_focuser('CCD Imager Simulator (focuser)'); s.select_rotator('Field Rotator Simulator'); s.select_mount('Mount Simulator'); s.select_dome('Dome Simulator'); s.select_gps('GPS Simulator'); s.select_guider_camera('CCD Guider Simulator'); s.select_guider('CCD Guider Simulator (guider)'); s.select_frame_type('Light'); s.select_image_format('RAW'); s.set_frame(0,0,100,100); s.reset_frame(); s.select_camera_mode('BIN_1x1'); s.set_gain(10); s.set_offset(5); s.set_gamma(1); s.select_program('M'); s.select_aperture('f/4'); s.select_shutter('1/10'); s.select_iso('800'); s.enable_cooler(-10); s.disable_cooler(); s.enable_dithering(2,3,4); s.disable_dithering(); s.enable_meridian_flip(true,0); s.disable_meridian_flip(); s.enable_filter_offsets(); s.disable_filter_offsets(); s.set_fits_header('OBJECT','M42'); s.remove_fits_header('OBJECT'); s.select_filter('L'); s.set_directory('/tmp'); s.set_file_template('frame'); s.set_object_name('M42'); s.start_preview(0.1); s.stop_preview(); s.capture_batch(2,0.1); s.capture_batch('batch',2,0.1); s.capture_stream(2,0.1); s.capture_stream('stream',2,0.1); s.set_manual_focuser_mode(); s.set_automatic_focuser_mode(); s.focus(0.1); s.focus_ignore_failure(0.1); s.clear_focuser_selection(); s.set_focuser_position(100); s.slew(1,2); s.park(); s.unpark(); s.home(); s.enable_tracking(); s.disable_tracking(); s.dome_slew(90); s.dome_park(); s.dome_unpark(); s.dome_open(); s.dome_close(); s.enable_ha_limit(); s.disable_ha_limit(); s.enable_time_limit(); s.disable_time_limit(); s.enable_dome_slaving(); s.disable_dome_slaving(); s.make_dome_slaving_persistent(); s.make_dome_slaving_not_persistent(); s.enable_field_derotation(); s.disable_field_derotation(); s.make_field_derotation_persistent(); s.make_field_derotation_not_persistent(); s.enable_joystick_control(); s.disable_joystick_control(); s.wait_for_gps(); s.calibrate_guiding(); s.calibrate_guiding(0.1); s.calibrate_guiding(0.1,0.4); s.start_guiding(); s.start_guiding(0.1); s.start_guiding_exposure(0.1); s.stop_guiding(); s.clear_guider_selection(); s.set_solver_filter('L'); s.sync_center(0.1); s.precise_goto(0.1,1,2); s.set_rotator_angle(45); s.estimate(); new Sequence('start').start();"));
 	ASSERT_TRUE(wait_sequence(INDIGO_OK_STATE, 5));
-	ASSERT_TRUE(check_js("publicMethods.length===108 && publicMethods.every(function(n){return publicCalls[n]>0}) && s.step>100 && s.progress>100 && s.exposure===0.8 && s.reset_loop_content_state===false"));
+	ASSERT_TRUE(check_js("publicMethods.length===109 && publicMethods.every(function(n){return publicCalls[n]>0}) && s.step>100 && s.progress>100 && s.exposure===0.8 && s.reset_loop_content_state===false"));
 	ASSERT_TRUE(check_js("s.sequence.every(function(entry){var name=entry.execute.substring(0,entry.execute.indexOf('(')); return typeof indigo_sequencer[name]==='function' && Function('return function(){indigo_sequencer.'+entry.execute+'}')})"));
 }
 
@@ -554,6 +624,15 @@ static void capture_accounting(void) {
 	ASSERT_TRUE(run_js("var s=new Sequence('capture'); s.capture_batch(3,2); s.capture_batch('named',2,4); s.capture_stream(5,1); s.capture_stream('stream',2,3); testCapture={exposure:s.exposure,progress:s.progress,step:s.step,sequence:s.sequence};"));
 	ASSERT_TRUE(check_js("testCapture.exposure===25 && testCapture.step===4 && testCapture.progress===14"));
 	ASSERT_TRUE(check_js("testCapture.sequence[0].execute==='set_batch(3,2)' && testCapture.sequence[3].execute.indexOf('named')>=0 && testCapture.sequence[13].execute==='start_imager_process(\"STREAMING\")'"));
+}
+
+static void estimate_counts(void) {
+	ASSERT_TRUE(run_js("var s=new Sequence('estimate'); s.unpark(); s.slew(1,2); s.repeat(2,function(){s.capture_batch(3,2); s.wait(5);}); s.start_guiding(); s.capture_stream('stream',4,1); s.dome_open(); testEstimate=s.estimate();"));
+	ASSERT_TRUE(check_js("testEstimate.exposure===16 && testEstimate.frames===10 && testEstimate.operations===4 && testEstimate.waits===10 && testEstimate.unknown===false"));
+	ASSERT_TRUE(run_js("var s=new Sequence('estimate unknown'); s.capture_batch(1,1); s.wait_until_solar_altitude_below(-18); testEstimate=s.estimate();"));
+	ASSERT_TRUE(check_js("testEstimate.frames===1 && testEstimate.unknown===true"));
+	ASSERT_TRUE(run_js("testEstimate=new Sequence('empty estimate').estimate();"));
+	ASSERT_TRUE(check_js("testEstimate.exposure===0 && testEstimate.frames===0 && testEstimate.operations===0 && testEstimate.waits===0 && testEstimate.unknown===false"));
 }
 
 static void empty_sequence_execution(void) {
@@ -581,29 +660,69 @@ static void string_arguments_and_utc_break(void) {
 	ASSERT_TRUE(wait_message("quote \" slash \\", 5));
 }
 
+// the reason of the failed step is published before the update that ends the sequence Alert
 static void failure_abort_policy(void) {
+	int alerts_before = alerts();
 	ASSERT_TRUE(run_js("afterFailure=false; var s=new Sequence('abort failure'); s.select_imager_agent('Missing Agent'); s.select_frame_type('Light'); s.evaluate('afterFailure=true'); s.start();"));
 	ASSERT_TRUE(wait_sequence(INDIGO_ALERT_STATE, 5));
 	ASSERT_TRUE(check_js("afterFailure===false"));
 	ASSERT_TRUE(wait_message("Sequence failed", 5));
+	ASSERT_TRUE(started_with(""));
+	ASSERT_TRUE(failed_with(alerts_before, MISSING_AGENT_FAILURE));
+	ASSERT_TRUE(failure_is(MISSING_AGENT_FAILURE));
+	ASSERT_TRUE(wait_message(MISSING_AGENT_FAILURE, 5));
 }
 
+// a failure the sequence continues after is no reason of its end
 static void failure_continue_policy(void) {
 	ASSERT_TRUE(run_js("afterFailure=false; var s=new Sequence('continue failure'); s.continue_on_failure(); s.select_imager_agent('Missing Agent'); s.select_frame_type('Light'); s.evaluate('afterFailure=true'); s.start();"));
 	ASSERT_TRUE(wait_sequence(INDIGO_OK_STATE, 5));
 	ASSERT_TRUE(check_js("afterFailure===true"));
+	ASSERT_TRUE(wait_message(MISSING_AGENT_FAILURE, 5));
+	ASSERT_TRUE(failure_is(""));
+	ASSERT_EQ_INT(0, alerts());
 }
 
 static void failure_recovery_policy(void) {
 	ASSERT_TRUE(run_js("recoveryTrace=''; var s=new Sequence('recover failure'); s.recover_on_failure(); s.select_imager_agent('Missing Agent'); s.select_frame_type('Light'); s.evaluate(\"recoveryTrace+='S'\"); s.recovery_point(); s.evaluate(\"recoveryTrace+='R'\"); s.start();"));
 	ASSERT_TRUE(wait_sequence(INDIGO_OK_STATE, 5));
 	ASSERT_TRUE(check_js("recoveryTrace==='R'"));
+	ASSERT_TRUE(failure_is(""));
+	ASSERT_EQ_INT(0, alerts());
 }
 
+// the failure that sent the sequence to a recovery point it did not find is the reason of its end
 static void recovery_without_point(void) {
+	int alerts_before = alerts();
 	ASSERT_TRUE(run_js("var s=new Sequence('recover without point'); s.recover_on_failure(); s.select_imager_agent('Missing Agent'); s.select_frame_type('Light'); s.start();"));
 	ASSERT_TRUE(wait_sequence(INDIGO_ALERT_STATE, 5));
 	ASSERT_TRUE(wait_message("no recovery point found", 5));
+	ASSERT_TRUE(failed_with(alerts_before, MISSING_AGENT_FAILURE));
+	ASSERT_TRUE(failure_is(MISSING_AGENT_FAILURE));
+}
+
+// the reason of an earlier failure is cleared before the next sequence starts, an abort and a reset leave no reason
+static void failure_reason_cleared_by_start_abort_and_reset(void) {
+	int alerts_before = alerts();
+	ASSERT_TRUE(run_js("var s=new Sequence('failed'); s.select_imager_agent('Missing Agent'); s.select_frame_type('Light'); s.start();"));
+	ASSERT_TRUE(wait_message("Sequence failed", 5));
+	ASSERT_TRUE(failure_is(MISSING_AGENT_FAILURE));
+	ASSERT_TRUE(run_js("var s=new Sequence('aborted'); s.wait(10); s.start();"));
+	ASSERT_TRUE(wait_message("Suspended for 10s", 5));
+	ASSERT_TRUE(started_with(""));
+	ASSERT_TRUE(failure_is(""));
+	ASSERT_TRUE(change_switch(SCRIPTING, "AGENT_ABORT_PROCESS", "ABORT", true, INDIGO_OK_STATE));
+	ASSERT_TRUE(wait_message("Sequence aborted", 5));
+	ASSERT_TRUE(failed_with(alerts_before + 1, ""));
+	ASSERT_TRUE(failure_is(""));
+	ASSERT_TRUE(run_js("var s=new Sequence('failed again'); s.select_imager_agent('Missing Agent'); s.select_frame_type('Light'); s.start();"));
+	for (int i = 0; i < 500 && alerts() < alerts_before + 3; i++) {
+		indigo_usleep(10000);
+	}
+	ASSERT_TRUE(failed_with(alerts_before + 2, MISSING_AGENT_FAILURE));
+	ASSERT_TRUE(failure_is(MISSING_AGENT_FAILURE));
+	ASSERT_TRUE(change_switch(SCRIPTING, "SEQUENCE_RESET", "RESET", true, INDIGO_OK_STATE));
+	ASSERT_TRUE(failure_is(""));
 }
 
 static void pause_resume_abort_reset(void) {
@@ -627,6 +746,40 @@ static void pause_resume_abort_reset(void) {
 	ASSERT_EQ_INT(sequence_before, revision(SCRIPTING, "SEQUENCE_STATE"));
 }
 
+// clients send the library before every script they run, which must not replace a running sequence or an enabled flip
+static void library_reload_keeps_running_sequence(void) {
+	ASSERT_TRUE(run_js("reloadTrace=0; var s=new Sequence('reload'); s.repeat(2,function(){s.wait(0.5);}); s.evaluate('reloadTrace=1'); s.start();"));
+	ASSERT_TRUE(wait_sequence(INDIGO_BUSY_STATE, 2));
+	// the loop property is defined asynchronously once the loop is entered
+	indigo_property *loop = NULL;
+	for (int i = 0; i < 200 && (loop = snapshot(SCRIPTING, "LOOP_0")) == NULL; i++) {
+		indigo_usleep(10000);
+	}
+	ASSERT_TRUE(loop != NULL);
+	indigo_release_property(loop);
+	ASSERT_TRUE(load_sequencer());
+	ASSERT_TRUE(check_js("indigo_sequencer.sequence != null && indigo_sequencer.name === 'reload'"));
+	ASSERT_TRUE(check_js("indigo_event_handlers.indigo_sequencer === indigo_sequencer"));
+	loop = snapshot(SCRIPTING, "LOOP_0");
+	ASSERT_TRUE(loop != NULL);
+	indigo_release_property(loop);
+	ASSERT_TRUE(failure_is(""));
+	ASSERT_TRUE(wait_message("Sequencer reloaded, the running sequence continues", 5));
+	ASSERT_TRUE(wait_sequence(INDIGO_OK_STATE, 5));
+	ASSERT_TRUE(check_js("reloadTrace===1"));
+	// an idle sequencer is replaced by the reloaded library
+	ASSERT_TRUE(run_js("indigo_sequencer.reload_marker = true;"));
+	ASSERT_TRUE(load_sequencer());
+	ASSERT_TRUE(check_js("indigo_sequencer.reload_marker === undefined"));
+	// an enabled flip keeps its flipper
+	ASSERT_TRUE(run_js("indigo_flipper.reload_marker = true; indigo_event_handlers.indigo_flipper = indigo_flipper;"));
+	ASSERT_TRUE(load_sequencer());
+	ASSERT_TRUE(check_js("indigo_flipper.reload_marker === true && indigo_event_handlers.indigo_flipper === indigo_flipper"));
+	ASSERT_TRUE(run_js("delete indigo_event_handlers.indigo_flipper;"));
+	ASSERT_TRUE(load_sequencer());
+	ASSERT_TRUE(check_js("indigo_flipper.reload_marker === undefined"));
+}
+
 static void past_waits_and_breaks(void) {
 	ASSERT_TRUE(run_js("timeTrace=''; var s=new Sequence('past times'); s.wait_until('2024-01-01 12:34:55'); s.wait_until(1704112495); s.break_at(1704112495); s.evaluate(\"timeTrace+='A'\"); s.resume_point(); s.evaluate(\"timeTrace+='B'\"); s.start();"));
 	ASSERT_TRUE(wait_sequence(INDIGO_OK_STATE, 5));
@@ -641,6 +794,19 @@ static void simulator_imaging(void) {
 	ASSERT_TRUE(run_js(script));
 	ASSERT_TRUE(wait_sequence(INDIGO_OK_STATE, 40));
 	ASSERT_TRUE(wait_message("Sequence finished", 5));
+}
+
+// a task folder that does not exist yet: CCD_LOCAL_MODE accepts it, the first saved image creates it
+static void simulator_imaging_in_a_folder_that_does_not_exist(void) {
+	char script[2048], folder[512];
+	snprintf(folder, sizeof(folder), "%s/Rosette Nebula/", test_root);
+	snprintf(script, sizeof(script), "var s=new Sequence('new folder'); s.select_imager_camera('CCD Imager Simulator'); s.select_image_format('RAW'); s.set_directory('%s'); s.set_object_name('Rosette Nebula'); s.capture_batch(1,0.05); s.start();", folder);
+	struct stat st;
+	ASSERT_TRUE(stat(folder, &st) != 0);
+	ASSERT_TRUE(run_js(script));
+	ASSERT_TRUE(wait_sequence(INDIGO_OK_STATE, 40));
+	ASSERT_TRUE(wait_message("Sequence finished", 5));
+	ASSERT_TRUE(stat(folder, &st) == 0 && S_ISDIR(st.st_mode));
 }
 
 static void simulator_preview_and_stream(void) {
@@ -988,6 +1154,7 @@ static bool failed_flip_keeps_sequence_state(indigo_property_state state) {
 	unsigned sequence_before = revision(SCRIPTING, "SEQUENCE_STATE");
 	unsigned steps_before = revision(SCRIPTING, "SEQUENCE_STEP_STATE");
 	unsigned abort_before = revision(SCRIPTING, "AGENT_ABORT_PROCESS");
+	unsigned failure_before = revision(SCRIPTING, "SEQUENCE_FAILURE");
 	int aborted_before = count_messages("Sequence aborted");
 	atomic_store(&solver_process_fails, true);
 	REQUIRE(run_flip_to_centering());
@@ -1000,6 +1167,7 @@ static bool failed_flip_keeps_sequence_state(indigo_property_state state) {
 	REQUIRE(same_state);
 	REQUIRE(revision(SCRIPTING, "SEQUENCE_STATE") == sequence_before);
 	REQUIRE(revision(SCRIPTING, "SEQUENCE_STEP_STATE") == steps_before);
+	REQUIRE(revision(SCRIPTING, "SEQUENCE_FAILURE") == failure_before);
 	REQUIRE(count_messages("Sequence aborted") == aborted_before);
 	return true;
 }
@@ -1014,6 +1182,7 @@ static void meridian_flip_failure_keeps_failed_state(void) {
 	ASSERT_TRUE(run_js("var s=new Sequence('flip after failure'); s.enable_meridian_flip(true,0); s.set_solver_filter('Missing'); s.start();"));
 	ASSERT_TRUE(wait_message("Sequence failed", 5));
 	ASSERT_TRUE(failed_flip_keeps_sequence_state(INDIGO_ALERT_STATE));
+	ASSERT_TRUE(failure_is("Failed to set non-existent option 'Missing' for 'Astrometry Agent -> Solver filter'"));
 }
 
 static void meridian_flip_failure_keeps_aborted_state(void) {
@@ -1088,6 +1257,7 @@ static void meridian_flip_failure_recovers(void) {
 	ASSERT_TRUE(check_js("recoveryTrace==='1' && indigo_sequencer.wait_for_timer===null && indigo_event_handlers.indigo_flipper===undefined"));
 	ASSERT_TRUE(wait_message("Meridian flip failed (due to sync & center failure)", 5));
 	ASSERT_TRUE(wait_message("Recovered from failure at recovery point #1", 5));
+	ASSERT_TRUE(failure_is(""));
 	indigo_property *property = snapshot(SCRIPTING, "FLIPPER_STATE");
 	ASSERT_TRUE(property != NULL);
 	ASSERT_EQ_INT(INDIGO_ALERT_STATE, property->state);
@@ -1116,17 +1286,84 @@ static void meridian_flip_failure_during_endless_capture_recovers(void) {
 	ASSERT_TRUE(wait_message("Recovered from failure at recovery point #1", 5));
 }
 
+static bool wait_mount_at_transit(double timeout) {
+	for (double deadline = indigo_monotonic_time() + timeout; indigo_monotonic_time() < deadline; indigo_usleep(10000)) {
+		indigo_property *property = snapshot(MOUNT, "AGENT_MOUNT_DISPLAY_COORDINATES_PROPERTY");
+		if (property != NULL) {
+			bool at_transit = false;
+			for (int i = 0; i < property->count; i++) {
+				if (!strcmp(property->items[i].name, "TIME_TO_TRANSIT") && fabs(property->items[i].number.value) < 0.2) {
+					at_transit = true;
+				}
+			}
+			indigo_release_property(property);
+			if (at_transit) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+// The Imager Agent itself is paused by the flip: the mount simulator is slewed to just before its transit, so the capture batch pauses before its exposure
+// and the flip is started by the pause the Imager Agent publishes. The target is the JNow RA minus the time to transit, but the simulator takes it as J2000,
+// so the mount lands 0.02-0.06 h early; the time to transit has to stay positive, otherwise the Mount Agent reports a flip and the flipper starts a real slew
+static void meridian_flip_failure_aborts_imager_paused_after_transit(void) {
+	char steps[1024];
+	ASSERT_TRUE(run_js("var s=new Sequence('track mount'); s.select_mount('Mount Simulator'); s.unpark(); s.enable_tracking(); s.start();"));
+	ASSERT_TRUE(wait_sequence(INDIGO_OK_STATE, 15));
+	ASSERT_TRUE(check_js("indigo_devices['Mount Agent'].AGENT_MOUNT_DISPLAY_COORDINATES_PROPERTY != null"));
+	ASSERT_TRUE(run_js("var d=indigo_devices['Mount Agent'].AGENT_MOUNT_DISPLAY_COORDINATES_PROPERTY.items; var s=new Sequence('slew to transit'); s.select_mount('Mount Simulator'); s.slew((d.RA_JNOW-d.TIME_TO_TRANSIT+24)%24,45); s.start();"));
+	ASSERT_TRUE(wait_sequence(INDIGO_OK_STATE, 60));
+	ASSERT_TRUE(wait_mount_at_transit(5));
+	// the Imager Agent learns the time to transit from its related Mount Agent
+	ASSERT_TRUE(run_js("indigo_change_switch_property('Imager Agent','FILTER_RELATED_AGENT_LIST',{'Mount Agent':true});"));
+	ASSERT_TRUE(wait_switch_item(IMAGER, "FILTER_RELATED_AGENT_LIST", "Mount Agent", true));
+	snprintf(steps, sizeof(steps), "s.recover_on_failure(); s.select_imager_camera('CCD Imager Simulator'); s.select_image_format('RAW'); s.set_directory('%s'); s.enable_meridian_flip(true,-0.5); s.capture_batch(1,30); s.evaluate(\"recoveryTrace+='A'\"); s.recovery_point(); s.evaluate(\"recoveryTrace+='1'\");", test_root);
+	char script[2048];
+	snprintf(script, sizeof(script), "recoveryTrace=''; var s=new Sequence('flip failure'); %s s.start();", steps);
+	ASSERT_TRUE(run_js(script));
+	ASSERT_TRUE(wait_sequence(INDIGO_BUSY_STATE, 2));
+	// the imager pauses itself and the sequencer reacts to the pause it published, no event is injected
+	ASSERT_TRUE(wait_message("Batch paused, transit", 10));
+	ASSERT_TRUE(wait_property_state(IMAGER, "AGENT_PAUSE_PROCESS", INDIGO_BUSY_STATE, 5));
+	ASSERT_TRUE(wait_switch_item(IMAGER, "AGENT_PAUSE_PROCESS", "PAUSE_AFTER_TRANSIT", true));
+	ASSERT_TRUE(wait_switch_item(SCRIPTING, "FLIPPER_STATE", "WAITING_FOR_TRANSIT", true));
+	ASSERT_TRUE(wait_message("Meridian flip waits for transit", 5));
+	ASSERT_TRUE(wait_property_state(IMAGER, "AGENT_START_PROCESS", INDIGO_BUSY_STATE, 5));
+	unsigned abort_before = revision(IMAGER, "AGENT_ABORT_PROCESS");
+	atomic_store(&solver_process_fails, true);
+	ASSERT_TRUE(run_js("indigo_flipper.waiting_for_transit=false; indigo_flipper.waiting_for_slew=true; indigo_flipper.on_update({device:indigo_flipper.devices[MOUNT_AGENT],name:'AGENT_START_PROCESS',state:'Ok',items:{}});"));
+	// the flip failure aborts the paused capture, which releases the pause, and the failed step recovers
+	ASSERT_TRUE(wait_message("Meridian flip failed (due to sync & center failure)", 5));
+	ASSERT_TRUE(wait_state(IMAGER, "AGENT_ABORT_PROCESS", abort_before, INDIGO_OK_STATE, 5));
+	ASSERT_TRUE(wait_sequence(INDIGO_OK_STATE, 20));
+	ASSERT_TRUE(check_js("recoveryTrace==='1' && indigo_sequencer.flip_failure===null && indigo_event_handlers.indigo_flipper===undefined"));
+	ASSERT_TRUE(wait_message("Recovered from failure at recovery point #1", 5));
+	ASSERT_TRUE(wait_property_state(IMAGER, "AGENT_START_PROCESS", INDIGO_ALERT_STATE, 5));
+	indigo_property *property = snapshot(SCRIPTING, "FLIPPER_STATE");
+	ASSERT_TRUE(property != NULL);
+	ASSERT_EQ_INT(INDIGO_ALERT_STATE, property->state);
+	indigo_release_property(property);
+	ASSERT_FALSE(has_message("Meridian flip finished"));
+}
+
 static void meridian_flip_failure_continues(void) {
 	ASSERT_TRUE(fail_flip_during_step("s.continue_on_failure(); s.enable_meridian_flip(true,0); s.wait(10); s.evaluate(\"recoveryTrace+='A'\");", NULL));
 	ASSERT_TRUE(wait_sequence(INDIGO_OK_STATE, 5));
 	ASSERT_TRUE(check_js("recoveryTrace==='A'"));
+	ASSERT_TRUE(failure_is(""));
 }
 
+// under abort_on_failure() the failed flip aborts the sequence, its reason is published before the end
 static void meridian_flip_failure_aborts(void) {
+	int alerts_before = alerts();
 	ASSERT_TRUE(fail_flip_during_step("s.enable_meridian_flip(true,0); s.wait(10); s.evaluate(\"recoveryTrace+='A'\"); s.recovery_point(); s.evaluate(\"recoveryTrace+='1'\");", NULL));
 	ASSERT_TRUE(wait_sequence(INDIGO_ALERT_STATE, 5));
 	ASSERT_TRUE(wait_message("Sequence aborted", 5));
 	ASSERT_TRUE(check_js("recoveryTrace==='' && indigo_sequencer.step_states[''+indigo_sequencer.step]==='Alert'"));
+	ASSERT_TRUE(failed_with(alerts_before, "Meridian flip failed (due to sync & center failure)"));
+	ASSERT_TRUE(failure_is("Meridian flip failed (due to sync & center failure)"));
 }
 
 // An abort requested just before the sequence ended runs its timer afterwards
@@ -1272,6 +1509,8 @@ static void paused_stored_flip_failure_recovers(void) {
 static const indigo_test_case tests[] = {
 	{ "library inventory and properties", library_inventory },
 	{ "published property schema", published_property_schema },
+	{ "library reload keeps running sequence", library_reload_keeps_running_sequence },
+	{ "estimate counts", estimate_counts },
 	{ "all public constructors", all_public_constructors },
 	{ "focus batch snapshot", focus_batch_snapshot },
 	{ "loop and timing construction", loop_and_timing_construction },
@@ -1284,9 +1523,11 @@ static const indigo_test_case tests[] = {
 	{ "failure continue policy", failure_continue_policy },
 	{ "failure recovery policy", failure_recovery_policy },
 	{ "recovery without point", recovery_without_point },
+	{ "failure reason cleared by start abort and reset", failure_reason_cleared_by_start_abort_and_reset },
 	{ "pause resume abort reset", pause_resume_abort_reset },
 	{ "past waits and breaks", past_waits_and_breaks },
 	{ "simulator imaging", simulator_imaging },
+	{ "simulator imaging in a folder that does not exist", simulator_imaging_in_a_folder_that_does_not_exist },
 	{ "simulator preview", simulator_preview_and_stream },
 	{ "simulator stream", simulator_stream },
 	{ "simulator mount dome GPS rotator", simulator_mount_dome_gps_rotator },
@@ -1315,6 +1556,7 @@ static const indigo_test_case tests[] = {
 	{ "meridian flip failure recovers", meridian_flip_failure_recovers },
 	{ "meridian flip failure during capture recovers", meridian_flip_failure_during_capture_recovers },
 	{ "meridian flip failure during endless capture recovers", meridian_flip_failure_during_endless_capture_recovers },
+	{ "meridian flip failure aborts imager paused after transit", meridian_flip_failure_aborts_imager_paused_after_transit },
 	{ "meridian flip failure continues", meridian_flip_failure_continues },
 	{ "meridian flip failure aborts", meridian_flip_failure_aborts },
 	{ "meridian flip failure keeps finished state", meridian_flip_failure_keeps_finished_state },

@@ -11,8 +11,9 @@
 | agent_imager            | 3️⃣ | ✅ Yes | ⛔ N/A | ✅ Yes | ✅ Yes | 65 / 0 | |
 | agent_mcp               | 3️⃣ | ✅ Project | ⛔ N/A | ⛔ N/A | ✅ Sim | 34 / 0 | |
 | agent_mount             | 3️⃣ | ✅ Yes | ⛔ N/A | ✅ Yes | ✅ Yes | 79 / 0 | |
-| agent_scripting         | 3️⃣ | ✅ Yes | ⛔ N/A | ✅ Yes | ✅ Yes | 63 / 0 | |
+| agent_scripting         | 3️⃣ | ✅ Yes | ⛔ N/A | ✅ Yes | ✅ Yes | 67 / 0 | |
 | agent_platesolver       | 3️⃣ | ✅ Project | ⛔ N/A | ✅ Yes | ✅ Sim | 162 / 0 | |
+| agent_scheduler         | 3️⃣ | ✅ Project | ⛔ N/A | ✅ Yes | ✅ Sim | 75 / 0 | |
 | agent_astrometry        | 2️⃣ | ✅ Yes | ⛔ N/A | ✅ Yes | ✅ Sim | 87 / 0 | |
 | ao_sx                   | 3️⃣ | ✅ Yes | ✅ Yes | ✅ Yes | ✅ HW  | 11 / 16 | |
 | aux_alto                | 3️⃣ | ✅ Yes | ✅ Yes | ✅ Yes | ✅ HW  | 36 / 10 | |
@@ -129,7 +130,7 @@
 | mount_rainbow           | 3️⃣ | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Sim | 39 / 0 | |
 | mount_simulator         | 3️⃣ | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Sim | 28 / 0 | |
 | mount_starbook          | 3️⃣ | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Sim | 26 / 0 | |
-| mount_synscan           | 3️⃣ | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Sim | 96 / 19 | |
+| mount_synscan           | 3️⃣ | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Sim | 97 / 20 | |
 | mount_temma             | 3️⃣ | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Sim | 30 / 0 | |
 | polaralign_simulator    | 3️⃣ | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Sim | 11 / 0 | |
 | rotator_asi             | 3️⃣ | ✅ Yes | ✅ Yes | ✅ Yes | ✅ HW  | 17 / 0 | |

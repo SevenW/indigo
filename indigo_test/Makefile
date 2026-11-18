@@ -38,10 +38,15 @@ UNIT_TESTS = \
 	$(UNIT_BUILD)/test_mount_alignment_load \
 	$(UNIT_BUILD)/test_profile_selection \
 	$(UNIT_BUILD)/test_rgb48 \
+	$(UNIT_BUILD)/test_ccd_fits_header \
 	$(UNIT_BUILD)/test_image_math \
 	$(UNIT_BUILD)/test_core_text_bounds \
 	$(UNIT_BUILD)/test_align_math \
 	$(UNIT_BUILD)/test_agent_platesolver_core \
+	$(UNIT_BUILD)/test_agent_scheduler_header \
+	$(UNIT_BUILD)/test_agent_scheduler_sky \
+	$(UNIT_BUILD)/test_agent_scheduler_plan \
+	$(UNIT_BUILD)/test_agent_scheduler_night \
 	$(UNIT_BUILD)/test_aux_math \
 	$(UNIT_BUILD)/test_base64 \
 	$(UNIT_BUILD)/test_bus_helpers \
@@ -62,6 +67,7 @@ UNIT_TESTS = \
 	$(UNIT_BUILD)/test_system_alpaca_json \
 	$(UNIT_BUILD)/test_raw_image \
 	$(UNIT_BUILD)/test_star_detection \
+	$(UNIT_BUILD)/test_gp_guider_alloc \
 	$(UNIT_BUILD)/test_raw_to_fits \
 	$(UNIT_BUILD)/test_recording_io \
 	$(UNIT_BUILD)/test_bahtinov
@@ -157,6 +163,7 @@ INTEGRATION_TESTS = $(INTEGRATION_BUILD)/test_additional_instances \
 	$(INTEGRATION_BUILD)/test_indigo_solver_tool \
 	$(INTEGRATION_BUILD)/test_agent_scripting \
 	$(INTEGRATION_BUILD)/test_agent_scripting_sequencer \
+	$(INTEGRATION_BUILD)/test_agent_scheduler \
 	$(INTEGRATION_BUILD)/test_agent_imager_guider_mount \
 	$(INTEGRATION_BUILD)/test_agent_imager_instances \
 	$(INTEGRATION_BUILD)/test_ccd_simulator \
@@ -470,6 +477,10 @@ $(UNIT_BUILD)/test_raw_to_fits: unit/test_raw_to_fits.c test_runner.h | $(UNIT_B
 $(UNIT_BUILD)/test_star_detection: unit/test_star_detection.c ../indigo_libs/indigo_raw_utils.c ../indigo_libs/indigo/indigo_raw_utils.h test_runner.h | $(UNIT_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< ../indigo_libs/indigo_raw_utils.c $(TEST_LDFLAGS)
 
+# Compile the implementation directly so malloc() can be replaced by a failing allocator.
+$(UNIT_BUILD)/test_gp_guider_alloc: unit/test_gp_guider_alloc.c ../indigo_libs/indigo_gp_guider.c ../indigo_libs/indigo/indigo_gp_guider.h test_runner.h | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
+
 $(UNIT_BUILD)/test_raw_image: unit/test_raw_image.c test_runner.h $(BUILD_LIB)/libindigo.a | $(UNIT_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
 
@@ -522,6 +533,18 @@ $(UNIT_BUILD)/test_align_math: unit/test_align_math.c test_runner.h | $(UNIT_BUI
 
 $(UNIT_BUILD)/test_agent_platesolver_core: unit/test_agent_platesolver_core.c test_runner.h $(BUILD_DRIVERS)/indigo_agent_platesolver.a | $(UNIT_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(BUILD_DRIVERS)/indigo_agent_platesolver.a $(TEST_LDFLAGS) -lindigocat
+
+$(UNIT_BUILD)/test_agent_scheduler_header: unit/test_agent_scheduler_header.c test_runner.h ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_header.h $(BUILD_DRIVERS)/indigo_agent_scheduler.a | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(BUILD_DRIVERS)/indigo_agent_scheduler.a $(TEST_LDFLAGS) -lindigocat
+
+$(UNIT_BUILD)/test_agent_scheduler_sky: unit/test_agent_scheduler_sky.c test_runner.h ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_sky.h $(BUILD_DRIVERS)/indigo_agent_scheduler.a | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(BUILD_DRIVERS)/indigo_agent_scheduler.a $(TEST_LDFLAGS) -lindigocat
+
+$(UNIT_BUILD)/test_agent_scheduler_plan: unit/test_agent_scheduler_plan.c test_runner.h ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_plan.h ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_sky.h $(BUILD_DRIVERS)/indigo_agent_scheduler.a | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(BUILD_DRIVERS)/indigo_agent_scheduler.a $(TEST_LDFLAGS) -lindigocat
+
+$(UNIT_BUILD)/test_agent_scheduler_night: unit/test_agent_scheduler_night.c test_runner.h ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_night.h $(BUILD_DRIVERS)/indigo_agent_scheduler.a | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(BUILD_DRIVERS)/indigo_agent_scheduler.a $(TEST_LDFLAGS) -lindigocat
 
 $(UNIT_BUILD)/test_test_runner: unit/test_test_runner.c test_runner.h | $(UNIT_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
@@ -1104,7 +1127,7 @@ benchmark-system-alpaca-guide: $(INTEGRATION_BUILD)/test_system_alpaca_simulator
 	SYSTEM_ALPACA_TEST_TIMING=1 INDIGO_TEST_JOBS=1 INDIGO_TEST_CASE_FILTER=guider_timing ./$(INTEGRATION_BUILD)/test_system_alpaca_simulator
 
 # Opt-in OmniSim tier: the system_alpaca driver against ASCOM OmniSim (ASCOM Alpaca Simulators) on real time. OmniSim is installed by
-# hand into omnisim/ next to the INDIGO working tree (.factory/tasks/archive/20261027203747-a8d5-archive-refactor-notes/refactor/system_alpaca.md 4.1) or named by INDIGO_TEST_OMNISIM; nothing is downloaded
+# hand into omnisim/ next to the INDIGO working tree (3dedba4cb:.factory/tasks/archive/20261027203747-a8d5-archive-refactor-notes/refactor/system_alpaca.md 4.1) or named by INDIGO_TEST_OMNISIM; nothing is downloaded
 # here, and without it the test reports the tier as not run. Not in INTEGRATION_TESTS or OPT_IN_DRIVER_TESTS on purpose, so the
 # ordinary recorded run of the driver never depends on OmniSim.
 SYSTEM_ALPACA_OMNISIM_TEST_CFLAGS = $(TEST_CFLAGS) -DSYSTEM_ALPACA_OMNISIM_DIR='"$(abspath ../../omnisim)"'
@@ -2588,6 +2611,36 @@ SEQUENCER_SIMULATORS = $(INTEGRATION_BUILD)/sequencer_ccd_simulator.o $(INTEGRAT
 $(INTEGRATION_BUILD)/test_agent_scripting_sequencer: integration/test_agent_scripting_sequencer.c test_runner.h $(SEQUENCER_TEST_OBJECTS) $(SEQUENCER_SIMULATORS) $(BUILD_LIB)/libindigo.a $(BUILD_LIB)/libindigocat.a | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) $(SEQUENCER_TEST_FLAGS) $< $(SEQUENCER_TEST_OBJECTS) $(SEQUENCER_SIMULATORS) -o $@ $(LDFLAGS) $(SEQUENCER_TEST_FLAGS) $(BUILD_LIB)/libindigo.a $(BUILD_LIB)/libindigocat.a $(BUILD_LIB)/libjpeg.a $(BUILD_LIB)/libtiff.a $(BUILD_LIB)/libraw.a -lusb-1.0 $(if $(filter Darwin,$(OS_DETECTED)),-lhidapi,-lhidapi-libusb -ludev -ldns_sd -lavahi-client -lavahi-common) -lz -lstdc++ -lm -lpthread -Wl,-rpath,$(BUILD_LIB)
 
+# Scheduler Agent with the real Scripting Agent and Sequencer.js; task bodies only wait, so no device simulators are needed.
+SCHEDULER_TEST_FLAGS = -DSEQUENCER_JS_PATH='"$(abspath ../indigo_drivers/agent_scripting/library/Sequencer.js)"'
+
+$(INTEGRATION_BUILD)/test_agent_scheduler: integration/test_agent_scheduler.c integration/parallel_case_runner.h test_runner.h ../indigo_drivers/agent_scripting/library/Sequencer.js $(BUILD_DRIVERS)/indigo_agent_scheduler.a $(BUILD_DRIVERS)/indigo_agent_scripting.a $(BUILD_LIB)/libindigo.a $(BUILD_LIB)/libindigocat.a | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) $(SCHEDULER_TEST_FLAGS) $< -o $@ $(BUILD_DRIVERS)/indigo_agent_scheduler.a $(BUILD_DRIVERS)/indigo_agent_scripting.a $(TEST_LDFLAGS) -lindigocat
+
+$(INTEGRATION_BUILD)/test_agent_scheduler_asan: integration/test_agent_scheduler.c integration/parallel_case_runner.h test_runner.h ../indigo_drivers/agent_scheduler/indigo_agent_scheduler.c ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_header.c ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_sky.c ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_plan.c ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_night.c ../indigo_drivers/agent_scheduler/Sequencer.js.dat $(BUILD_DRIVERS)/indigo_agent_scripting.a | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) $(SCHEDULER_TEST_FLAGS) -I../indigo_drivers/agent_scheduler -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ $< ../indigo_drivers/agent_scheduler/indigo_agent_scheduler.c ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_header.c ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_sky.c ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_plan.c ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_night.c $(BUILD_DRIVERS)/indigo_agent_scripting.a $(TEST_LDFLAGS) -lindigocat -fsanitize=address,undefined
+
+# Opt-in native server acceptance: the Scheduler Agent runs capture, slew, guiding and urgent tasks
+# against the CCD and mount simulators in a private indigo_server.
+.PHONY: test-scheduler-simulators
+test-scheduler-simulators:
+	python3 integration/run_scheduler_simulators.py $(SCHEDULER_ARGS)
+
+OPT_IN_DRIVER_TESTS += $(INTEGRATION_BUILD)/test_agent_scheduler_simulators
+
+$(INTEGRATION_BUILD)/test_agent_scheduler_simulators: integration/run_scheduler_simulators.py | $(INTEGRATION_BUILD)
+	printf '%s\n' '#!/bin/sh' 'exec python3 "$$(dirname "$$0")/../../integration/run_scheduler_simulators.py" "$$@"' > $@
+	chmod +x $@
+
+.PHONY: test-scheduler-sandbox
+# opt-in: one night of the scheduler in a private server through the hand-testing tool
+test-scheduler-sandbox: check-lib
+	python3 ../tools/scheduler_sandbox.py --script ../tools/scheduler_sandbox_night.txt
+
+.PHONY: test-agent-scheduler
+test-agent-scheduler: check-lib $(INTEGRATION_BUILD)/test_agent_scheduler
+	$(INTEGRATION_BUILD)/test_agent_scheduler
+
 .PHONY: test-agent-scripting-sequencer
 test-agent-scripting-sequencer: check-lib $(INTEGRATION_BUILD)/test_agent_scripting_sequencer
 	$(INTEGRATION_BUILD)/test_agent_scripting_sequencer
@@ -3770,6 +3823,9 @@ $(INTEGRATION_BUILD)/test_agent_imager_numerics: integration/test_agent_imager_n
 	CC="$(CC)" python3 $< $@
 
 $(UNIT_BUILD)/test_rgb48: unit/test_rgb48.c test_runner.h $(BUILD_LIB)/libindigo.a | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(TEST_LDFLAGS)
+
+$(UNIT_BUILD)/test_ccd_fits_header: unit/test_ccd_fits_header.c test_runner.h $(BUILD_LIB)/libindigo.a | $(UNIT_BUILD)
 	$(CC) $(TEST_CFLAGS) $< -o $@ $(TEST_LDFLAGS)
 
 $(UNIT_BUILD)/test_mount_alignment_load: unit/test_mount_alignment_load.c test_runner.h ../indigo_libs/indigo_mount_driver.c | $(UNIT_BUILD)

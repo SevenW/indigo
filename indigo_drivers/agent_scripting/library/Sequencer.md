@@ -19,6 +19,8 @@ A sequence is built by creating a `Sequence` object and calling helper methods o
 
 Before the first sequence is created, the content of [Sequencer.js](Sequencer.js) must be executed as a script by setting it as the value of `AGENT_SCRIPTING_RUN_SCRIPT_ITEM` in the `AGENT_SCRIPTING_RUN_SCRIPT_PROPERTY` of the Scripting Agent. This defines the `Sequence` class and registers the internal event handlers.
 
+The library may be executed again at any time; clients usually send it before every script they run. A reload keeps a running sequence and an enabled meridian flip, together with their loop and flipper state, and sends the message "Sequencer reloaded, the running sequence continues". Only an idle sequencer is replaced by the reloaded definitions.
+
 ## State: under development
 
 ## Quick start
@@ -126,6 +128,8 @@ sequence.start("Imager Agent @ observatory", "Mount Agent @ observatory", "Guide
 
 `start()` also selects the solver agent automatically. Solver agents are mutually exclusive on one server, so the `"Platesolver Agent"`, `"Astrometry Agent"` or `"ASTAP Agent"` loaded on the host of the imager agent given to `start()` is used, otherwise the local one, otherwise one loaded on another host. An imager agent which is not loaded does not count, its host is not used. With no solver agent `"Astrometry Agent"` is assumed, on the host of the loaded imager agent, otherwise local. A `select_imager_agent()` step does not change the solver agent. Use the `select_solver_agent()` step to choose another solver agent or one loaded later by the sequence. Every `start()` selects the solver agent again. The selected solver agent is used while it is loaded, also when the imager agent or a solver agent on its host appears later; when it is replaced during the sequence, the solver steps, the abort and the meridian flip select a loaded one again in the same way, and the sequence keeps using the new one.
 
+`estimate()` returns counts of the built sequence for a duration estimate, without starting anything: `{ exposure, frames, operations, waits, unknown }`. `exposure` is the total exposure time and `frames` the number of frames of the capture steps, `operations` the number of slew, centering, focus, guiding start, park, unpark, home and dome steps, `waits` the sum of fixed `wait()` delays in seconds, and `unknown` is true when a `wait_until()` or a sky wait makes the duration unknowable. Steps inside `repeat()` count once per iteration. The Scheduler Agent adds its own overheads per frame and per operation.
+
 ## Step reference
 
 All methods below are called on a `Sequence` instance and append one or more steps. Times/exposures are in **seconds**, coordinates in the units used by the corresponding agent (RA in hours, Dec in degrees), unless noted otherwise.
@@ -160,6 +164,8 @@ By default a failing step aborts the sequence. These steps change that behavior 
 | `recover_on_failure()` | On failure, skip **forward** to the next `recovery_point()`, discarding the steps in between. If no recovery point follows the failed step, the sequence ends in the **Alert** state ("no recovery point found"). |
 | `recovery_point()` | Mark a point where execution resumes after a failure while `recover_on_failure()` is active. Recovery only ever skips forward, so a recovery point must be placed *after* the steps it is meant to protect. |
 | `resume_point()` | Mark a point where execution continues after a `break_at()` / `break_at_ha()` break fires; the steps between the break and this point are skipped. If no resume point follows, the sequence simply finishes ("no resume point found"). |
+
+Every failure is reported by a message. When a failure ends the sequence in the **Alert** state, its reason is also published in `SEQUENCE_FAILURE.MESSAGE`, before the `SEQUENCE_STATE` update that ends the sequence: the reason of the failed step under `abort_on_failure()`, including a failed meridian flip, and the reason of the failure that started the skip under `recover_on_failure()` when no recovery point follows. A failure the sequence continues after, under `continue_on_failure()`, `focus_ignore_failure()` or at a recovery point, leaves `MESSAGE` empty. A sequence aborted by `AGENT_ABORT_PROCESS` also ends in the **Alert** state, with `MESSAGE` empty.
 
 ### Configuration & drivers
 
@@ -304,7 +310,7 @@ Frames captured by `capture_batch` / `capture_stream` contribute to the `EXPOSUR
 
 | Method | Description |
 |---|---|
-| `enable_meridian_flip(use_solver, time)` | Enable automatic meridian flip. `use_solver` (boolean) selects whether plate solving is used to recenter after the flip; `time` is the pause after transit in seconds. The flip stays enabled after the sequence finishes and recenters with the solver agent loaded at the time of the flip, see `start()`; with no solver agent loaded the flip fails. A failed flip (slew, recentering or guiding) restores the HA limit it disabled and follows the failure policy: the step during which it ran fails, a capture paused by the flip is aborted first, and `continue_on_failure()` or `recover_on_failure()` continue the sequence; under `abort_on_failure()` the sequence and the agents are aborted. After the sequence ended only the agents are aborted, and `SEQUENCE_STATE` and `SEQUENCE_STEP_STATE` keep the result of the sequence, the failure is reported by its message and by `FLIPPER_STATE`. Guiding stopped by the flip is not restarted after a failure, so the steps after a recovery point should start it again. |
+| `enable_meridian_flip(use_solver, time)` | Enable automatic meridian flip. `use_solver` (boolean) selects whether plate solving is used to recenter after the flip; `time` is the pause after transit in hours (for example, `0.25` for 15 minutes; a negative value pauses before transit), passed unchanged to Imager Agent `AGENT_IMAGER_BATCH.PAUSE_AFTER_TRANSIT`. The flip stays enabled after the sequence finishes and recenters with the solver agent loaded at the time of the flip, see `start()`; with no solver agent loaded the flip fails. A failed flip (slew, recentering or guiding) restores the HA limit it disabled and follows the failure policy: the step during which it ran fails, a capture paused by the flip is aborted first, and `continue_on_failure()` or `recover_on_failure()` continue the sequence; under `abort_on_failure()` the sequence and the agents are aborted. After the sequence ended only the agents are aborted, and `SEQUENCE_STATE` and `SEQUENCE_STEP_STATE` keep the result of the sequence, the failure is reported by its message and by `FLIPPER_STATE`. Guiding stopped by the flip is not restarted after a failure, so the steps after a recovery point should start it again. |
 | `disable_meridian_flip()` | Disable automatic meridian flip. |
 
 ### Rotator
@@ -323,6 +329,7 @@ Once `start()` is called, the sequencer defines the following properties on the 
 |---|---|---|---|
 | `SEQUENCE_NAME` | Text, RO | `NAME` | Name of the currently executed sequence (from the `Sequence` constructor), or empty if none/unset. |
 | `SEQUENCE_STATE` | Number, RO | `STEP`, `PROGRESS`, `PROGRESS_TOTAL`, `EXPOSURE`, `EXPOSURE_TOTAL` | Overall execution state (see below). |
+| `SEQUENCE_FAILURE` | Text, RO | `MESSAGE` | Reason of the failure that ended the sequence in the **Alert** state, published before that `SEQUENCE_STATE` update, see [Failure handling & recovery](#failure-handling--recovery). Updated, empty, by `start()` before the `SEQUENCE_STATE` update that starts a sequence. Empty while a sequence runs, after it finished, after an abort by `AGENT_ABORT_PROCESS` and after `SEQUENCE_RESET`. |
 | `SEQUENCE_STEP_STATE` | Light, RO | one item per step | Per-step state, letting the GUI flag each step as idle / busy / ok / alert individually. |
 | `LOOP_x` | Number, RO | `STEP`, `COUNT` | One property per currently executing loop, where `x` is the zero-based nesting level. `STEP` is the index of the loop command, `COUNT` the number of completed iterations. |
 | `AGENT_ABORT_PROCESS` | Switch, RW | `ABORT` | Setting `ABORT` aborts the running sequence. |
@@ -335,7 +342,7 @@ Once `start()` is called, the sequencer defines the following properties on the 
 - `STEP` - zero-based index of the currently executing step. On failure (property in **Alert** state) it holds the index of the failed step.
 - `PROGRESS` / `PROGRESS_TOTAL` - number of executed microsteps and total number of microsteps in the sequence (with loops unrolled). A single helper call can expand to several microsteps.
 - `EXPOSURE` / `EXPOSURE_TOTAL` - elapsed and total exposure time (seconds) across all `capture_batch()` / `capture_stream()` steps.
-- Property **state** reflects the sequence: **Ok** = finished, **Busy** = executing, **Alert** = failed.
+- Property **state** reflects the sequence: **Ok** = finished, **Busy** = executing, **Alert** = failed or aborted; `SEQUENCE_FAILURE.MESSAGE` holds the reason of a failure and is empty after an abort by `AGENT_ABORT_PROCESS`.
 
 A GUI can use `STEP` together with the property state to flag steps: those with index `< STEP` as done, those with index `> STEP` as idle, and the one equal to `STEP` as either executing (Busy) or failed (Alert). `SEQUENCE_STEP_STATE` provides the same information per step directly.
 

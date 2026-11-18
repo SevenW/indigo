@@ -23,7 +23,7 @@
  \file indigo_focuser_wemacro_bt.m
  */
 
-#define DRIVER_VERSION 0x02000004
+#define DRIVER_VERSION 0x02000007
 #define DRIVER_NAME "indigo_focuser_wemacro_bt"
 
 #include <stdlib.h>
@@ -193,6 +193,9 @@ static indigo_result focuser_detach(indigo_device *device);
 	ffe1 = nil;
 	indigo_delete_property(device, X_RAIL_CONFIG_PROPERTY, NULL);
 	indigo_delete_property(device, X_RAIL_SHUTTER_PROPERTY, NULL);
+	if (X_RAIL_EXECUTE_PROPERTY->state == INDIGO_BUSY_STATE) {
+		X_RAIL_EXECUTE_PROPERTY->state = INDIGO_ALERT_STATE;
+	}
 	indigo_delete_property(device, X_RAIL_EXECUTE_PROPERTY, NULL);
 	CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 	indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
@@ -338,7 +341,7 @@ static indigo_result focuser_attach(indigo_device *device) {
 		indigo_init_number_item(X_RAIL_EXECUTE_PER_STEP_ITEM, "SHUTTER_PER_STEP", "Shutter per step", 1, 9, 1, 1);
 		indigo_init_number_item(X_RAIL_EXECUTE_INTERVAL_ITEM, "SHUTTER_INTERVAL", "Shutter interval", 1, 99, 1, 1);
 		indigo_init_number_item(X_RAIL_EXECUTE_LENGTH_ITEM, "LENGTH", "Step size", 1, 0xFFFFFF, 1, 1);
-		indigo_init_number_item(X_RAIL_EXECUTE_COUNT_ITEM, "COUNT", "Step count", 0, 0xFFFFFF, 1, 1);
+		indigo_init_number_item(X_RAIL_EXECUTE_COUNT_ITEM, "COUNT", "Step count", 1, 0xFFFFFF, 1, 1);
 		// --------------------------------------------------------------------------------
 		INDIGO_DEVICE_ATTACH_LOG(DRIVER_NAME, device->name);
 		return focuser_enumerate_properties(device, NULL, NULL);
@@ -383,6 +386,7 @@ static indigo_result focuser_change_property(indigo_device *device, indigo_clien
 		}
 	} else if (indigo_property_match_changeable(FOCUSER_STEPS_PROPERTY, property)) {
 		// -------------------------------------------------------------------------------- FOCUSER_STEPS
+		INDIGO_REJECT_CHANGE_IF(X_RAIL_EXECUTE_PROPERTY->state == INDIGO_BUSY_STATE, FOCUSER_STEPS_PROPERTY, "A batch is running");
 		indigo_property_copy_values(FOCUSER_STEPS_PROPERTY, property, false);
 		if (FOCUSER_STEPS_PROPERTY->state != INDIGO_BUSY_STATE) {
 			FOCUSER_STEPS_PROPERTY->state = INDIGO_BUSY_STATE;
@@ -434,9 +438,12 @@ static indigo_result focuser_change_property(indigo_device *device, indigo_clien
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(X_RAIL_EXECUTE_PROPERTY, property)) {
 		// -------------------------------------------------------------------------------- X_RAIL_EXECUTE
+		INDIGO_REJECT_CHANGE_IF(X_RAIL_EXECUTE_PROPERTY->state == INDIGO_BUSY_STATE, X_RAIL_EXECUTE_PROPERTY, "A batch is already running");
+		INDIGO_REJECT_CHANGE_IF(FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE, X_RAIL_EXECUTE_PROPERTY, "A move is running");
 		indigo_property_copy_values(X_RAIL_EXECUTE_PROPERTY, property, false);
 		[delegate cmd:0x80 a:FOCUSER_SPEED_ITEM->number.value == 2 ? 0xFF : 0 b:0 c:0 d:(uint32_t)X_RAIL_EXECUTE_LENGTH_ITEM->number.value];
 		indigo_usleep(100000);
+		X_RAIL_EXECUTE_COUNT_ITEM->number.value = X_RAIL_EXECUTE_COUNT_ITEM->number.target;
 		[delegate cmd:0x10 | (X_RAIL_CONFIG_BEEP_ITEM->sw.value ? 0x02 : 0) | (X_RAIL_CONFIG_BACK_ITEM->sw.value ? 0x08 : 0) a:(uint8_t)X_RAIL_EXECUTE_SETTLE_TIME_ITEM->number.value b:(uint8_t)X_RAIL_EXECUTE_PER_STEP_ITEM->number.value c:(uint8_t)X_RAIL_EXECUTE_INTERVAL_ITEM->number.value d:(uint32_t)X_RAIL_EXECUTE_COUNT_ITEM->number.value - 1];
 		X_RAIL_EXECUTE_PROPERTY->state = INDIGO_BUSY_STATE;
 		indigo_update_property(device, X_RAIL_EXECUTE_PROPERTY, NULL);

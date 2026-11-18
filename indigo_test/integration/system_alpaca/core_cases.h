@@ -1059,7 +1059,7 @@ static void core_connect_disconnect_platform7(void) {
 	indigo_usleep(200000);
 	SA_CHECK(sa_is_connected(sa_device) && sa_request_count(0, "PUT", "/api/v1/focuser/0/connect") == 1);
 	// decision D5: the INDIGO disconnect sends disconnect to the Alpaca device, and polling stops. A Platform 7 disconnect is asynchronous:
-	// CONNECTION stays BUSY while "connecting" is polled, until the device reports that it is no longer connecting (.factory/tasks/archive/20261027203747-a8d5-archive-refactor-notes/refactor/system_alpaca.md 2.4, 2.7)
+	// CONNECTION stays BUSY while "connecting" is polled, until the device reports that it is no longer connecting (3dedba4cb:.factory/tasks/archive/20261027203747-a8d5-archive-refactor-notes/refactor/system_alpaca.md 2.4, 2.7)
 	revision = sa_revision(sa_device, CONNECTION_PROPERTY_NAME);
 	int mark = sa_message_mark();
 	SA_CHECK(sa_request_connection(sa_device, false) && SA_WAIT(sa_request_count(0, "PUT", "/api/v1/focuser/0/disconnect") == 1, SA_TIMEOUT));
@@ -1297,8 +1297,9 @@ static indigo_result core_remote_change(indigo_device *device, indigo_client *cl
 
 // Proxy names have no "@", the separator of the remote services of the bus (REV-16, D14): "ALPACA <DeviceName>" (D17), with every "@" of the
 // DeviceName replaced, so that a DeviceName like "Focuser @ Pier" does not bring it back; the ServerName ("Omni @ Observatory") is no part
-// of the name any more. With the old " @ " a request for "Focuser @ INDIGO Alpaca Simulator" was also routed to a remote service named
-// "INDIGO" (indigo_bus.c matches "@ <service>" anywhere in the device name); with the new names no request for a proxy reaches such a service.
+// of the name any more. indigo_bus.c routes a change request for "<device> @ <service>" to the remote service named "<service>" (and an
+// enumeration request for any name that contains "@ <service>"), so a proxy named "Focuser @ Pier" would send its requests to a remote service
+// named "Pier"; with the new names no request for a proxy reaches such a service.
 static void core_proxy_names_without_at(void) {
 	static const char *arguments[] = { "--server-name", "Omni @ Observatory", "--device", "focuser:name=Focuser @ Pier", "--device", "telescope:name=Mount@Pier", NULL };
 	static indigo_device remote_omni = INDIGO_DEVICE_INITIALIZER("@ Omni", NULL, core_remote_enumerate, core_remote_change, NULL, NULL);
@@ -1317,7 +1318,7 @@ static void core_proxy_names_without_at(void) {
 	snprintf(guider, sizeof(guider), "%s (guider)", mount);
 	SA_CHECK(!strcmp(mount, "ALPACA Mount-Pier") && SA_WAIT(sa_defined(guider, CONNECTION_PROPERTY_NAME), SA_TIMEOUT));
 	SA_CHECK(strchr(focuser, '@') == NULL && strchr(mount, '@') == NULL && strchr(guider, '@') == NULL);
-	// remote services whose names are contained in the names the server reported
+	// remote services named like the parts of the names the server reported
 	SA_CHECK(indigo_use_host_suffix && indigo_attach_device(&remote_omni) == INDIGO_OK && indigo_attach_device(&remote_observatory) == INDIGO_OK && indigo_attach_device(&remote_indigo) == INDIGO_OK && indigo_attach_device(&remote_pier) == INDIGO_OK);
 	attached = true;
 	atomic_store(&core_remote_requests, 0);
@@ -1329,8 +1330,8 @@ static void core_proxy_names_without_at(void) {
 		SA_CHECK(indigo_change_switch_property_1(&sa_client, proxies[i], CONFIG_PROPERTY_NAME, CONFIG_LOAD_ITEM_NAME, true) == INDIGO_OK);
 	}
 	SA_CHECK(atomic_load(&core_remote_requests) == 0);
-	// the probe works: the old form of the name is routed to the remote service "INDIGO" of the simulator's default server name
-	SA_CHECK(indigo_change_switch_property_1(&sa_client, "Focuser Simulator @ " SA_SERVER_NAME, CONFIG_PROPERTY_NAME, CONFIG_LOAD_ITEM_NAME, true) == INDIGO_OK && atomic_load(&core_remote_requests) == 1);
+	// the probe works: the DeviceName with its "@" kept is routed to the remote service "Pier"
+	SA_CHECK(indigo_change_switch_property_1(&sa_client, "Focuser @ Pier", CONFIG_PROPERTY_NAME, CONFIG_LOAD_ITEM_NAME, true) == INDIGO_OK && atomic_load(&core_remote_requests) == 1);
 	SA_CHECK(sa_disconnect(mount));
 cleanup:
 	if (attached) {
