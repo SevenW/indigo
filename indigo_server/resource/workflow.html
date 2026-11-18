@@ -8,7 +8,21 @@
 		<link rel="stylesheet" href="indigo.css"/>
 		<style>
 			.workflow-page {
+				flex: 1 1 auto;
+				min-height: 0;
+				overflow-x: hidden;
+				overflow-y: auto;
 				max-width: 1800px;
+			}
+			#ROOT {
+				display: flex;
+				flex-direction: column;
+				height: 100vh;
+				height: 100dvh;
+				overflow: hidden;
+			}
+			.workflow-status-bar {
+				flex: 0 0 auto;
 			}
 			.workflow-image-stage {
 				min-height: 18rem;
@@ -29,9 +43,6 @@
 				text-align: center;
 				padding: 2rem;
 			}
-			.workflow-card {
-				height: 100%;
-			}
 			[data-theme="dark"] .workflow-page .bg-light {
 				color: var(--text-color);
 			}
@@ -45,10 +56,12 @@
 			.workflow-guide-graph .indigo-guider-graph {
 				display: flex;
 				gap: .5rem;
+				height: auto;
+				position: static;
 			}
 			.workflow-guide-graph canvas {
 				width: 50%;
-				height: 12rem;
+				height: 6rem;
 			}
 			@media (max-width: 767.98px) {
 				.workflow-image-stage {
@@ -57,7 +70,7 @@
 				}
 				.workflow-focus-graph .indigo-autofocus-graph svg,
 				.workflow-guide-graph canvas {
-					height: 9rem;
+					height: 5rem;
 				}
 				.workflow-guide-graph .indigo-guider-graph {
 					gap: .25rem;
@@ -211,8 +224,10 @@
 						</div>
 					</div>
 				</template>
-				<indigo-status-bar></indigo-status-bar>
 			</main>
+			<div class="workflow-status-bar">
+				<indigo-status-bar></indigo-status-bar>
+			</div>
 		</div>
 	</body>
 	<script src="jquery.min.js"></script>
