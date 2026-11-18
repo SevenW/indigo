@@ -1957,6 +1957,10 @@ static void server_main() {
 			#include "resource/workflow.html.data"
 		};
 		indigo_server_add_resource("/workflow.html", workflow_html, sizeof(workflow_html), "text/html");
+		static unsigned char workflow_png[] = {
+			#include "resource/workflow.png.data"
+		};
+		indigo_server_add_resource("/workflow.png", workflow_png, sizeof(workflow_png), "image/png");
 		static unsigned char sequencer_js[] = {
 			#include "resource/Sequencer.js.data"
 		};
